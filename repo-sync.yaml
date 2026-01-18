@@ -1,0 +1,4 @@
+repos:
+  # - name: example-lib
+  #   public: https://github.com/org/example-lib.git
+  #   private: git@gitlab.company.com:vendor/example-lib.git

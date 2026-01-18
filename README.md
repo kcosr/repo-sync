@@ -21,7 +21,7 @@ npx repo-sync
 
 ## Quick Start
 
-1. Create a config file at `~/.repo-sync/config.yaml`:
+1. Create a config file at `repo-sync.yaml` in your project:
 
 ```yaml
 repos:
@@ -110,12 +110,12 @@ repo-sync clean lodash      # Clean specific repo
 
 | Option | Description |
 |--------|-------------|
-| `-c, --config <path>` | Custom config file path (default: `~/.repo-sync/config.yaml`) |
+| `-c, --config <path>` | Custom config file path (default: `./repo-sync.yaml`) |
 | `-h, --help` | Show help |
 
 ## Config File
 
-Default location: `~/.repo-sync/config.yaml`
+Default location: `./repo-sync.yaml` (current directory)
 
 ```yaml
 repos:
@@ -126,7 +126,7 @@ repos:
 
 ## How It Works
 
-1. **Pull**: Does a `git clone --mirror` (or `git fetch --prune` on update) from public into a temporary bare repo at `~/.repo-sync/repos/<name>.git`
+1. **Pull**: Does a `git clone --mirror` (or `git fetch --prune` on update) from public into a cache directory at `~/.repo-sync/repos/<name>.git`
 
 2. **Status**: Fetches refs from private, compares with local clone, shows what's new/changed
 
@@ -138,8 +138,8 @@ The `--mirror` flag ensures an exact copy - all branches, all tags, all history.
 
 **Initial setup:**
 ```bash
-# 1. Add repos to config
-cat >> ~/.repo-sync/config.yaml << 'EOF'
+# 1. Create config in your project
+cat > repo-sync.yaml << 'EOF'
 repos:
   - name: react
     public: https://github.com/facebook/react.git

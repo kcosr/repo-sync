@@ -1,5 +1,5 @@
 import { rmSync } from "node:fs";
-import { ensureConfigDir, getRepoTempPath } from "./config.js";
+import { ensureCacheDir, getRepoTempPath } from "./config.js";
 import {
   addRemote,
   cloneMirror,
@@ -35,7 +35,7 @@ export interface PushResult {
 }
 
 export function pull(repo: RepoConfig): PullResult {
-  ensureConfigDir();
+  ensureCacheDir();
   const repoPath = getRepoTempPath(repo.name);
   const exists = repoExists(repoPath);
 

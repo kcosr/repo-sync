@@ -4,26 +4,22 @@ import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { Config, RepoConfig } from "./types.js";
 
-const DEFAULT_CONFIG_DIR = join(homedir(), ".repo-sync");
-const DEFAULT_CONFIG_PATH = join(DEFAULT_CONFIG_DIR, "config.yaml");
+const DEFAULT_CONFIG_PATH = "repo-sync.yaml";
+const CACHE_DIR = join(homedir(), ".repo-sync");
 
 export function getConfigPath(customPath?: string): string {
   return customPath || DEFAULT_CONFIG_PATH;
 }
 
 export function getTempDir(): string {
-  return join(DEFAULT_CONFIG_DIR, "repos");
+  return join(CACHE_DIR, "repos");
 }
 
 export function getRepoTempPath(repoName: string): string {
   return join(getTempDir(), `${repoName}.git`);
 }
 
-export function ensureConfigDir(): void {
-  const configDir = DEFAULT_CONFIG_DIR;
-  if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
-  }
+export function ensureCacheDir(): void {
   const tempDir = getTempDir();
   if (!existsSync(tempDir)) {
     mkdirSync(tempDir, { recursive: true });
@@ -35,7 +31,7 @@ export function loadConfig(configPath?: string): Config {
 
   if (!existsSync(path)) {
     throw new Error(
-      `Config file not found: ${path}\nCreate it with:\n\n  mkdir -p ${dirname(path)}\n  cat > ${path} << 'EOF'\nrepos:\n  - name: example-repo\n    public: https://github.com/org/example-repo.git\n    private: git@private.company.com:vendor/example-repo.git\nEOF`,
+      `Config file not found: ${path}\nCreate it with:\n\n  cat > ${path} << 'EOF'\nrepos:\n  - name: example-repo\n    public: https://github.com/org/example-repo.git\n    private: git@private.company.com:vendor/example-repo.git\nEOF`,
     );
   }
 

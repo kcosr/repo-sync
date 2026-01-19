@@ -6,6 +6,8 @@
 
 ### Added
 
+- Added `markSource` config option to automatically add source repository notice to README files ([#1](https://github.com/kcosr/repo-sync/pull/1))
+
 ### Changed
 
 ### Fixed

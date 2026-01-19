@@ -2,13 +2,17 @@ import { rmSync } from "node:fs";
 import { ensureCacheDir, getRepoTempPath } from "./config.js";
 import {
   addRemote,
+  addSourceNotice,
   cloneMirror,
   compareRefs,
   fetchOrigin,
   fetchRemote,
+  getDefaultBranch,
   getLocalRefs,
+  getParentCommit,
   getRemoteRefs,
   getRepoCloneTime,
+  isSourceNoticeCommit,
   pushMirror,
   repoExists,
 } from "./git.js";
@@ -123,6 +127,27 @@ export function status(repo: RepoConfig): StatusResult {
   const localRefs = getLocalRefs(repoPath);
   const privateRefs = getRemoteRefs(repoPath, "private");
 
+  // If markSource is enabled, check if private's default branch HEAD is our notice commit
+  // If so, use its parent for comparison instead
+  if (repo.markSource) {
+    const defaultBranch = getDefaultBranch(repoPath);
+    const branchKey = `heads/${defaultBranch}`;
+    const privateBranchSha = privateRefs.get(branchKey);
+
+    if (privateBranchSha) {
+      // Check if this is our notice commit by checking the commit message
+      const privateRef = `refs/remotes/private/${defaultBranch}`;
+      if (isSourceNoticeCommit(repoPath, privateRef)) {
+        // Get the parent (the actual source commit)
+        const parentSha = getParentCommit(repoPath, privateRef);
+        if (parentSha) {
+          console.log("  Note: Comparing against parent of notice commit");
+          privateRefs.set(branchKey, parentSha);
+        }
+      }
+    }
+  }
+
   // Compare
   const { branches, tags } = compareRefs(repoPath, localRefs, privateRefs);
   baseStatus.branches = branches;
@@ -161,7 +186,7 @@ export function push(repo: RepoConfig): PushResult {
     };
   }
 
-  // Check status first
+  // Check status first (compares against parent of notice commit if markSource is enabled)
   const statusResult = status(repo);
   if (!statusResult.canPush) {
     return {
@@ -176,6 +201,20 @@ export function push(repo: RepoConfig): PushResult {
       success: true,
       pushed: false,
     };
+  }
+
+  // Add source notice if configured
+  if (repo.markSource) {
+    console.log("  Adding source notice to README...");
+    const branch = getDefaultBranch(repoPath);
+    const noticeResult = addSourceNotice(repoPath, repo.public, branch);
+    if (!noticeResult.success) {
+      return {
+        success: false,
+        pushed: false,
+        error: `Failed to add source notice: ${noticeResult.error}`,
+      };
+    }
   }
 
   // Push

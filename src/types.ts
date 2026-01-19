@@ -2,6 +2,7 @@ export interface RepoConfig {
   name: string;
   public: string;
   private: string;
+  markSource?: boolean;
 }
 
 export interface Config {

@@ -110,7 +110,21 @@ repos:
   - name: repo-name          # Identifier (used in commands and cache storage)
     public: <url>            # Public repo URL (HTTPS, no auth needed)
     private: <url>           # Private repo URL (SSH or HTTPS with auth)
+    markSource: true         # Optional: add notice to README showing source
 ```
+
+### `markSource` Option
+
+When `markSource: true` is set, the tool adds a notice to the top of the README indicating where the repository was mirrored from:
+
+```markdown
+> **📦 Mirrored Repository**
+>
+> This repository is automatically mirrored from [https://github.com/org/repo](https://github.com/org/repo).
+> Do not commit directly to this repository.
+```
+
+This adds one commit on top of the public history. On each sync, this commit is recreated.
 
 ## How It Works
 

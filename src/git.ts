@@ -256,6 +256,23 @@ export function getDefaultBranch(repoPath: string): string {
   return "master";
 }
 
+export function getParentCommit(repoPath: string, commitRef: string): string | null {
+  const result = exec(`git rev-parse ${commitRef}^`, repoPath);
+  if (result.success && result.output) {
+    return result.output;
+  }
+  return null;
+}
+
+export function isSourceNoticeCommit(repoPath: string, commitRef: string): boolean {
+  // Check if the commit message matches our notice commit
+  const result = exec(`git log -1 --format=%s ${commitRef}`, repoPath);
+  if (result.success) {
+    return result.output === "Add source repository notice";
+  }
+  return false;
+}
+
 export function addSourceNotice(repoPath: string, publicUrl: string, branch: string): ExecResult {
   const tempDir = join(tmpdir(), `repo-sync-${Date.now()}`);
 

@@ -2,10 +2,12 @@ import { rmSync } from "node:fs";
 import { ensureCacheDir, getRepoTempPath } from "./config.js";
 import {
   addRemote,
+  addSourceNotice,
   cloneMirror,
   compareRefs,
   fetchOrigin,
   fetchRemote,
+  getDefaultBranch,
   getLocalRefs,
   getRemoteRefs,
   getRepoCloneTime,
@@ -161,21 +163,39 @@ export function push(repo: RepoConfig): PushResult {
     };
   }
 
-  // Check status first
-  const statusResult = status(repo);
-  if (!statusResult.canPush) {
-    return {
-      success: false,
-      pushed: false,
-      error: statusResult.errors.join("; "),
-    };
+  // When markSource is enabled, we skip the divergence check since we expect
+  // our source notice commit to make the repos diverge. We'll force push.
+  if (!repo.markSource) {
+    // Check status first (only when not marking source)
+    const statusResult = status(repo);
+    if (!statusResult.canPush) {
+      return {
+        success: false,
+        pushed: false,
+        error: statusResult.errors.join("; "),
+      };
+    }
+
+    if (!statusResult.hasChanges) {
+      return {
+        success: true,
+        pushed: false,
+      };
+    }
   }
 
-  if (!statusResult.hasChanges) {
-    return {
-      success: true,
-      pushed: false,
-    };
+  // Add source notice if configured
+  if (repo.markSource) {
+    console.log("  Adding source notice to README...");
+    const branch = getDefaultBranch(repoPath);
+    const noticeResult = addSourceNotice(repoPath, repo.public, branch);
+    if (!noticeResult.success) {
+      return {
+        success: false,
+        pushed: false,
+        error: `Failed to add source notice: ${noticeResult.error}`,
+      };
+    }
   }
 
   // Push

@@ -1,5 +1,7 @@
 import { type ExecSyncOptions, execSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { RefComparison } from "./types.js";
 
 export interface ExecResult {
@@ -239,4 +241,119 @@ export function getRepoCloneTime(repoPath: string): Date | undefined {
   }
   const stats = statSync(repoPath);
   return stats.mtime;
+}
+
+export function getDefaultBranch(repoPath: string): string {
+  // Try to get the default branch from HEAD
+  const result = exec("git symbolic-ref HEAD", repoPath);
+  if (result.success) {
+    // Returns refs/heads/main or refs/heads/master
+    return result.output.replace("refs/heads/", "");
+  }
+  // Fallback to main, then master
+  const mainExists = exec("git show-ref --verify refs/heads/main", repoPath);
+  if (mainExists.success) return "main";
+  return "master";
+}
+
+export function addSourceNotice(repoPath: string, publicUrl: string, branch: string): ExecResult {
+  const tempDir = join(tmpdir(), `repo-sync-${Date.now()}`);
+
+  try {
+    // Clone the bare repo to a temp working directory
+    mkdirSync(tempDir, { recursive: true });
+    const cloneResult = exec(
+      `git clone "${repoPath}" "${tempDir}" --branch ${branch} --single-branch`,
+    );
+    if (!cloneResult.success) {
+      return { success: false, output: "", error: `Failed to clone to temp: ${cloneResult.error}` };
+    }
+
+    // Find README file (case-insensitive)
+    const readmeNames = [
+      "README.md",
+      "readme.md",
+      "README.MD",
+      "README",
+      "readme",
+      "README.txt",
+      "readme.txt",
+    ];
+    let readmePath: string | null = null;
+    let readmeName: string | null = null;
+
+    for (const name of readmeNames) {
+      const path = join(tempDir, name);
+      if (existsSync(path)) {
+        readmePath = path;
+        readmeName = name;
+        break;
+      }
+    }
+
+    if (!readmePath || !readmeName) {
+      // No README found, create one
+      readmePath = join(tempDir, "README.md");
+      readmeName = "README.md";
+      writeFileSync(readmePath, "");
+    }
+
+    // Read current content
+    const currentContent = readFileSync(readmePath, "utf-8");
+
+    // Check if notice already exists (from previous sync)
+    const noticeMarker = "<!-- repo-sync-source-notice -->";
+    let newContent: string;
+
+    if (currentContent.includes(noticeMarker)) {
+      // Replace existing notice
+      newContent = currentContent.replace(
+        /<!-- repo-sync-source-notice -->[\s\S]*?<!-- end-repo-sync-source-notice -->\n*/,
+        "",
+      );
+    } else {
+      newContent = currentContent;
+    }
+
+    // Prepend notice
+    const notice = `${noticeMarker}
+> **📦 Mirrored Repository**
+>
+> This repository is automatically mirrored from [${publicUrl}](${publicUrl}).
+> Do not commit directly to this repository.
+<!-- end-repo-sync-source-notice -->
+
+`;
+
+    newContent = notice + newContent;
+    writeFileSync(readmePath, newContent);
+
+    // Configure git user for the commit
+    exec('git config user.email "repo-sync@localhost"', tempDir);
+    exec('git config user.name "repo-sync"', tempDir);
+
+    // Commit the change
+    exec(`git add "${readmeName}"`, tempDir);
+    const commitResult = exec('git commit -m "Add source repository notice"', tempDir);
+    if (!commitResult.success) {
+      return { success: false, output: "", error: `Failed to commit: ${commitResult.error}` };
+    }
+
+    // Push back to the bare repo
+    const pushResult = exec(`git push origin ${branch}`, tempDir);
+    if (!pushResult.success) {
+      return {
+        success: false,
+        output: "",
+        error: `Failed to push to bare repo: ${pushResult.error}`,
+      };
+    }
+
+    return { success: true, output: "Source notice added" };
+  } finally {
+    // Cleanup temp directory
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
 }

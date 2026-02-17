@@ -75,6 +75,17 @@ lodash
     v4.18.0: abc1234 (new)
 ```
 
+### `clone [repo-name]`
+
+Create or update a local working clone at `<cacheDir>/work/<repo-name>` from the cached mirror.
+
+```bash
+node dist/cli.js clone              # Prepare work clones for all repos
+node dist/cli.js clone lodash       # Prepare work clone for one repo
+```
+
+Requires the repo to be pulled first (`pull`).
+
 ### `push [repo-name]`
 
 Push to private mirrors. Only pushes if local (from public) is ahead of private.
@@ -145,9 +156,11 @@ If `markSourceDeleteClone: false`, the tool keeps and reuses a clone at:
 
 1. **Pull**: Does `git clone --mirror` (or `git fetch --prune`) from public into `<cacheDir>/repos/<name>.git` (default: `~/.repo-sync/repos/<name>.git`)
 
-2. **Status**: Fetches refs from private, compares with cached clone, shows what's new/changed
+2. **Clone**: Optionally prepares a local working clone at `<cacheDir>/work/<name>` from the cached mirror
 
-3. **Push**: Pushes branches and tags to private with prune, syncing updates and deletions
+3. **Status**: Fetches refs from private, compares with cached clone, shows what's new/changed
+
+4. **Push**: Pushes branches and tags to private with prune, syncing updates and deletions
 
 Push sync keeps branches/tags aligned with public history.
 

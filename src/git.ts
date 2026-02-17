@@ -1,7 +1,7 @@
 import { type ExecSyncOptions, execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { RefComparison } from "./types.js";
 
 export interface ExecResult {
@@ -287,96 +287,142 @@ function sanitizeCloneName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "-");
 }
 
+function getWorkClonePath(options?: SourceNoticeOptions): {
+  clonePath: string;
+  deleteClone: boolean;
+} {
+  const cloneBaseDir = options?.cloneBaseDir || tmpdir();
+  const deleteClone = options?.deleteClone ?? true;
+  const cloneName = options?.cloneName ? sanitizeCloneName(options.cloneName) : "repo-sync-work";
+  const clonePath = deleteClone
+    ? join(cloneBaseDir, `repo-sync-${Date.now()}`)
+    : join(cloneBaseDir, cloneName);
+  return { clonePath, deleteClone };
+}
+
+function prepareWorkClone(repoPath: string, branch: string, clonePath: string): ExecResult {
+  mkdirSync(dirname(clonePath), { recursive: true });
+
+  if (!existsSync(clonePath)) {
+    const cloneResult = exec(
+      `git clone "${repoPath}" "${clonePath}" --branch ${branch} --single-branch`,
+    );
+    if (!cloneResult.success) {
+      return {
+        success: false,
+        output: "",
+        error: `Failed to clone to work directory: ${cloneResult.error}`,
+      };
+    }
+  } else {
+    const validRepoResult = exec("git rev-parse --git-dir", clonePath);
+    if (!validRepoResult.success) {
+      return {
+        success: false,
+        output: "",
+        error: `Configured work clone path is not a git repo: ${clonePath}`,
+      };
+    }
+
+    const dirtyResult = exec("git status --porcelain", clonePath);
+    if (!dirtyResult.success) {
+      return {
+        success: false,
+        output: "",
+        error: `Failed to inspect work clone: ${dirtyResult.error}`,
+      };
+    }
+    if (dirtyResult.output.trim().length > 0) {
+      return {
+        success: false,
+        output: "",
+        error: `Work clone has local changes: ${clonePath}. Commit/stash/reset changes before running clone.`,
+      };
+    }
+
+    const currentOrigin = exec("git remote get-url origin", clonePath);
+    if (!currentOrigin.success) {
+      return {
+        success: false,
+        output: "",
+        error: `Failed to read origin remote from work clone: ${currentOrigin.error}`,
+      };
+    }
+    if (currentOrigin.output !== repoPath) {
+      const updateOriginResult = exec(`git remote set-url origin "${repoPath}"`, clonePath);
+      if (!updateOriginResult.success) {
+        return {
+          success: false,
+          output: "",
+          error: `Failed to update origin in work clone: ${updateOriginResult.error}`,
+        };
+      }
+    }
+
+    const fetchResult = exec("git fetch origin", clonePath);
+    if (!fetchResult.success) {
+      return {
+        success: false,
+        output: "",
+        error: `Failed to refresh work clone: ${fetchResult.error}`,
+      };
+    }
+  }
+
+  const checkoutResult = exec(`git checkout -B ${branch} origin/${branch}`, clonePath);
+  if (!checkoutResult.success) {
+    return {
+      success: false,
+      output: "",
+      error: `Failed to prepare branch '${branch}' in work clone: ${checkoutResult.error}`,
+    };
+  }
+
+  return { success: true, output: "" };
+}
+
+export interface CloneWorkResult extends ExecResult {
+  clonePath: string;
+}
+
+export function cloneWorkDir(
+  repoPath: string,
+  branch: string,
+  cloneBaseDir: string,
+  repoName: string,
+): CloneWorkResult {
+  const clonePath = join(cloneBaseDir, sanitizeCloneName(repoName));
+  const prepareResult = prepareWorkClone(repoPath, branch, clonePath);
+  if (!prepareResult.success) {
+    return {
+      success: false,
+      output: "",
+      error: prepareResult.error,
+      clonePath,
+    };
+  }
+  return {
+    success: true,
+    output: "Work clone ready",
+    clonePath,
+  };
+}
+
 export function addSourceNotice(
   repoPath: string,
   publicUrl: string,
   branch: string,
   options?: SourceNoticeOptions,
 ): ExecResult {
-  const cloneBaseDir = options?.cloneBaseDir || tmpdir();
-  const deleteClone = options?.deleteClone ?? true;
-  const cloneName = options?.cloneName ? sanitizeCloneName(options.cloneName) : "repo-sync-work";
-  const tempDir = deleteClone
-    ? join(cloneBaseDir, `repo-sync-${Date.now()}`)
-    : join(cloneBaseDir, cloneName);
+  const { clonePath: tempDir, deleteClone } = getWorkClonePath(options);
 
   try {
-    mkdirSync(cloneBaseDir, { recursive: true });
-
-    if (!existsSync(tempDir)) {
-      // Clone the bare repo to a working directory
-      const cloneResult = exec(
-        `git clone "${repoPath}" "${tempDir}" --branch ${branch} --single-branch`,
-      );
-      if (!cloneResult.success) {
-        return {
-          success: false,
-          output: "",
-          error: `Failed to clone to temp: ${cloneResult.error}`,
-        };
-      }
-    } else {
-      // Re-use existing clone when cleanup is disabled.
-      const validRepoResult = exec("git rev-parse --git-dir", tempDir);
-      if (!validRepoResult.success) {
-        return {
-          success: false,
-          output: "",
-          error: `Configured markSource clone path is not a git repo: ${tempDir}`,
-        };
-      }
-
-      const dirtyResult = exec("git status --porcelain", tempDir);
-      if (!dirtyResult.success) {
-        return {
-          success: false,
-          output: "",
-          error: `Failed to inspect markSource clone: ${dirtyResult.error}`,
-        };
-      }
-      if (dirtyResult.output.trim().length > 0) {
-        return {
-          success: false,
-          output: "",
-          error: `markSource clone has local changes: ${tempDir}. Commit/stash/reset changes or re-enable cleanup.`,
-        };
-      }
-
-      const currentOrigin = exec("git remote get-url origin", tempDir);
-      if (!currentOrigin.success) {
-        return {
-          success: false,
-          output: "",
-          error: `Failed to read origin remote from markSource clone: ${currentOrigin.error}`,
-        };
-      }
-      if (currentOrigin.output !== repoPath) {
-        const updateOriginResult = exec(`git remote set-url origin "${repoPath}"`, tempDir);
-        if (!updateOriginResult.success) {
-          return {
-            success: false,
-            output: "",
-            error: `Failed to update origin in markSource clone: ${updateOriginResult.error}`,
-          };
-        }
-      }
-
-      const fetchResult = exec("git fetch origin", tempDir);
-      if (!fetchResult.success) {
-        return {
-          success: false,
-          output: "",
-          error: `Failed to refresh markSource clone: ${fetchResult.error}`,
-        };
-      }
-    }
-
-    const checkoutResult = exec(`git checkout -B ${branch} origin/${branch}`, tempDir);
-    if (!checkoutResult.success) {
+    const prepareResult = prepareWorkClone(repoPath, branch, tempDir);
+    if (!prepareResult.success) {
       return {
         success: false,
         output: "",
-        error: `Failed to prepare branch '${branch}' in markSource clone: ${checkoutResult.error}`,
+        error: prepareResult.error,
       };
     }
 

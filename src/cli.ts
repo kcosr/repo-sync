@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { findRepo, getCacheDir, loadConfig } from "./config.js";
-import { clean, formatStatus, pull, push, status } from "./sync.js";
+import { clean, clone, formatStatus, pull, push, status } from "./sync.js";
 import type { RepoConfig } from "./types.js";
 
 function printUsage(): void {
@@ -10,6 +10,7 @@ repo-sync - Sync public repositories to private mirrors
 
 Usage:
   repo-sync pull [repo-name]     Clone/fetch from public repos
+  repo-sync clone [repo-name]    Create/update local work clone
   repo-sync status [repo-name]   Show sync status
   repo-sync push [repo-name]     Push to private repos
   repo-sync clean [repo-name]    Remove local temp clones
@@ -21,6 +22,7 @@ Options:
 Examples:
   repo-sync pull                 Pull all configured repos
   repo-sync pull my-lib          Pull a specific repo
+  repo-sync clone my-lib         Prepare local work clone for a repo
   repo-sync status               Show status of all repos
   repo-sync push                 Push all repos to private
   repo-sync push -y              Push without status check
@@ -114,6 +116,31 @@ function commandStatus(repos: RepoConfig[], cacheDir: string): void {
   }
 }
 
+function commandClone(repos: RepoConfig[], cacheDir: string): void {
+  console.log(`Preparing work clones for ${repos.length} repo(s)...\n`);
+
+  let success = 0;
+  let failed = 0;
+
+  for (const repo of repos) {
+    console.log(`${repo.name}:`);
+    const result = clone(repo, { cacheDir });
+
+    if (result.success) {
+      console.log(`  ✓ Ready at ${result.clonePath}\n`);
+      success++;
+    } else {
+      console.error(`  ✗ ${result.error}\n`);
+      failed++;
+    }
+  }
+
+  console.log(`\nClone complete: ${success} succeeded, ${failed} failed`);
+  if (failed > 0) {
+    process.exit(1);
+  }
+}
+
 function commandPush(repos: RepoConfig[], cacheDir: string): void {
   console.log(`Pushing ${repos.length} repo(s)...\n`);
 
@@ -172,6 +199,9 @@ function main(): void {
     switch (command) {
       case "pull":
         commandPull(repos, cacheDir);
+        break;
+      case "clone":
+        commandClone(repos, cacheDir);
         break;
       case "status":
         commandStatus(repos, cacheDir);

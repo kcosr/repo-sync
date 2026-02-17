@@ -1,28 +1,49 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { Config, RepoConfig } from "./types.js";
 
 const DEFAULT_CONFIG_PATH = "repo-sync.yaml";
-const CACHE_DIR = join(homedir(), ".repo-sync");
+const DEFAULT_CACHE_DIR = join(homedir(), ".repo-sync");
 
 export function getConfigPath(customPath?: string): string {
   return customPath || DEFAULT_CONFIG_PATH;
 }
 
-export function getTempDir(): string {
-  return join(CACHE_DIR, "repos");
+function resolveCacheDir(cacheDir?: string): string {
+  if (!cacheDir) {
+    return DEFAULT_CACHE_DIR;
+  }
+  if (cacheDir === "~") {
+    return homedir();
+  }
+  if (cacheDir.startsWith("~/")) {
+    return join(homedir(), cacheDir.slice(2));
+  }
+  return cacheDir;
 }
 
-export function getRepoTempPath(repoName: string): string {
-  return join(getTempDir(), `${repoName}.git`);
+export function getCacheDir(config?: Config): string {
+  return resolveCacheDir(config?.cacheDir);
 }
 
-export function ensureCacheDir(): void {
-  const tempDir = getTempDir();
-  if (!existsSync(tempDir)) {
-    mkdirSync(tempDir, { recursive: true });
+export function getTempDir(cacheDir?: string): string {
+  return join(resolveCacheDir(cacheDir), "repos");
+}
+
+export function getWorkDir(cacheDir?: string): string {
+  return join(resolveCacheDir(cacheDir), "work");
+}
+
+export function getRepoTempPath(repoName: string, cacheDir?: string): string {
+  return join(getTempDir(cacheDir), `${repoName}.git`);
+}
+
+export function ensureCacheDir(cacheDir?: string): void {
+  const repoDir = getTempDir(cacheDir);
+  if (!existsSync(repoDir)) {
+    mkdirSync(repoDir, { recursive: true });
   }
 }
 
@@ -37,6 +58,15 @@ export function loadConfig(configPath?: string): Config {
 
   const content = readFileSync(path, "utf-8");
   const config = parseYaml(content) as Config;
+
+  if (config.cacheDir !== undefined) {
+    if (typeof config.cacheDir !== "string") {
+      throw new Error("Config 'cacheDir' must be a string");
+    }
+    if (config.cacheDir.trim().length === 0) {
+      throw new Error("Config 'cacheDir' cannot be empty");
+    }
+  }
 
   if (!config.repos || !Array.isArray(config.repos)) {
     throw new Error("Config must have a 'repos' array");
@@ -58,6 +88,9 @@ function validateRepoConfig(repo: RepoConfig): void {
   }
   if (!repo.private || typeof repo.private !== "string") {
     throw new Error(`Repo '${repo.name}' must have a 'private' URL`);
+  }
+  if (repo.markSourceDeleteClone !== undefined && typeof repo.markSourceDeleteClone !== "boolean") {
+    throw new Error(`Repo '${repo.name}' has invalid 'markSourceDeleteClone': expected boolean`);
   }
 }
 

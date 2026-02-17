@@ -3,9 +3,11 @@ export interface RepoConfig {
   public: string;
   private: string;
   markSource?: boolean;
+  markSourceDeleteClone?: boolean;
 }
 
 export interface Config {
+  cacheDir?: string;
   repos: RepoConfig[];
 }
 

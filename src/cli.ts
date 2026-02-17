@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { findRepo, loadConfig } from "./config.js";
+import { findRepo, getCacheDir, loadConfig } from "./config.js";
 import { clean, formatStatus, pull, push, status } from "./sync.js";
 import type { RepoConfig } from "./types.js";
 
@@ -15,7 +15,7 @@ Usage:
   repo-sync clean [repo-name]    Remove local temp clones
 
 Options:
-  -c, --config <path>   Path to config file (default: ~/.repo-sync/config.yaml)
+  -c, --config <path>   Path to config file (default: ./repo-sync.yaml)
   -h, --help            Show this help message
 
 Examples:
@@ -59,8 +59,15 @@ function parseArgs(args: string[]): {
   return { command, repoName, configPath, yes, help };
 }
 
-function getRepos(configPath: string | undefined, repoName: string | undefined): RepoConfig[] {
+function getRepos(
+  configPath: string | undefined,
+  repoName: string | undefined,
+): {
+  repos: RepoConfig[];
+  cacheDir: string;
+} {
   const config = loadConfig(configPath);
+  const cacheDir = getCacheDir(config);
 
   if (repoName) {
     const repo = findRepo(config, repoName);
@@ -69,13 +76,13 @@ function getRepos(configPath: string | undefined, repoName: string | undefined):
       console.error(`Available repos: ${config.repos.map((r) => r.name).join(", ")}`);
       process.exit(1);
     }
-    return [repo];
+    return { repos: [repo], cacheDir };
   }
 
-  return config.repos;
+  return { repos: config.repos, cacheDir };
 }
 
-function commandPull(repos: RepoConfig[]): void {
+function commandPull(repos: RepoConfig[], cacheDir: string): void {
   console.log(`Pulling ${repos.length} repo(s)...\n`);
 
   let success = 0;
@@ -83,7 +90,7 @@ function commandPull(repos: RepoConfig[]): void {
 
   for (const repo of repos) {
     console.log(`${repo.name}:`);
-    const result = pull(repo);
+    const result = pull(repo, { cacheDir });
 
     if (result.success) {
       console.log(`  ✓ ${result.isNew ? "Cloned" : "Updated"}\n`);
@@ -100,14 +107,14 @@ function commandPull(repos: RepoConfig[]): void {
   }
 }
 
-function commandStatus(repos: RepoConfig[]): void {
+function commandStatus(repos: RepoConfig[], cacheDir: string): void {
   for (const repo of repos) {
-    const result = status(repo);
+    const result = status(repo, { cacheDir });
     console.log(formatStatus(result));
   }
 }
 
-function commandPush(repos: RepoConfig[]): void {
+function commandPush(repos: RepoConfig[], cacheDir: string): void {
   console.log(`Pushing ${repos.length} repo(s)...\n`);
 
   let pushed = 0;
@@ -116,7 +123,7 @@ function commandPush(repos: RepoConfig[]): void {
 
   for (const repo of repos) {
     console.log(`${repo.name}:`);
-    const result = push(repo);
+    const result = push(repo, { cacheDir });
 
     if (result.success) {
       if (result.pushed) {
@@ -138,12 +145,12 @@ function commandPush(repos: RepoConfig[]): void {
   }
 }
 
-function commandClean(repos: RepoConfig[]): void {
+function commandClean(repos: RepoConfig[], cacheDir: string): void {
   console.log(`Cleaning ${repos.length} repo(s)...\n`);
 
   for (const repo of repos) {
     console.log(`${repo.name}: cleaning...`);
-    clean(repo);
+    clean(repo, { cacheDir });
     console.log("  ✓ Removed\n");
   }
 
@@ -160,20 +167,20 @@ function main(): void {
   }
 
   try {
-    const repos = getRepos(configPath, repoName);
+    const { repos, cacheDir } = getRepos(configPath, repoName);
 
     switch (command) {
       case "pull":
-        commandPull(repos);
+        commandPull(repos, cacheDir);
         break;
       case "status":
-        commandStatus(repos);
+        commandStatus(repos, cacheDir);
         break;
       case "push":
-        commandPush(repos);
+        commandPush(repos, cacheDir);
         break;
       case "clean":
-        commandClean(repos);
+        commandClean(repos, cacheDir);
         break;
       default:
         console.error(`Unknown command: ${command}`);

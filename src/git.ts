@@ -273,17 +273,107 @@ export function isSourceNoticeCommit(repoPath: string, commitRef: string): boole
   return false;
 }
 
-export function addSourceNotice(repoPath: string, publicUrl: string, branch: string): ExecResult {
-  const tempDir = join(tmpdir(), `repo-sync-${Date.now()}`);
+export interface SourceNoticeOptions {
+  cloneBaseDir?: string;
+  deleteClone?: boolean;
+  cloneName?: string;
+}
+
+function sanitizeCloneName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "-");
+}
+
+export function addSourceNotice(
+  repoPath: string,
+  publicUrl: string,
+  branch: string,
+  options?: SourceNoticeOptions,
+): ExecResult {
+  const cloneBaseDir = options?.cloneBaseDir || tmpdir();
+  const deleteClone = options?.deleteClone ?? true;
+  const cloneName = options?.cloneName ? sanitizeCloneName(options.cloneName) : "repo-sync-work";
+  const tempDir = deleteClone
+    ? join(cloneBaseDir, `repo-sync-${Date.now()}`)
+    : join(cloneBaseDir, cloneName);
 
   try {
-    // Clone the bare repo to a temp working directory
-    mkdirSync(tempDir, { recursive: true });
-    const cloneResult = exec(
-      `git clone "${repoPath}" "${tempDir}" --branch ${branch} --single-branch`,
-    );
-    if (!cloneResult.success) {
-      return { success: false, output: "", error: `Failed to clone to temp: ${cloneResult.error}` };
+    mkdirSync(cloneBaseDir, { recursive: true });
+
+    if (!existsSync(tempDir)) {
+      // Clone the bare repo to a working directory
+      const cloneResult = exec(
+        `git clone "${repoPath}" "${tempDir}" --branch ${branch} --single-branch`,
+      );
+      if (!cloneResult.success) {
+        return {
+          success: false,
+          output: "",
+          error: `Failed to clone to temp: ${cloneResult.error}`,
+        };
+      }
+    } else {
+      // Re-use existing clone when cleanup is disabled.
+      const validRepoResult = exec("git rev-parse --git-dir", tempDir);
+      if (!validRepoResult.success) {
+        return {
+          success: false,
+          output: "",
+          error: `Configured markSource clone path is not a git repo: ${tempDir}`,
+        };
+      }
+
+      const dirtyResult = exec("git status --porcelain", tempDir);
+      if (!dirtyResult.success) {
+        return {
+          success: false,
+          output: "",
+          error: `Failed to inspect markSource clone: ${dirtyResult.error}`,
+        };
+      }
+      if (dirtyResult.output.trim().length > 0) {
+        return {
+          success: false,
+          output: "",
+          error: `markSource clone has local changes: ${tempDir}. Commit/stash/reset changes or re-enable cleanup.`,
+        };
+      }
+
+      const currentOrigin = exec("git remote get-url origin", tempDir);
+      if (!currentOrigin.success) {
+        return {
+          success: false,
+          output: "",
+          error: `Failed to read origin remote from markSource clone: ${currentOrigin.error}`,
+        };
+      }
+      if (currentOrigin.output !== repoPath) {
+        const updateOriginResult = exec(`git remote set-url origin "${repoPath}"`, tempDir);
+        if (!updateOriginResult.success) {
+          return {
+            success: false,
+            output: "",
+            error: `Failed to update origin in markSource clone: ${updateOriginResult.error}`,
+          };
+        }
+      }
+
+      const fetchResult = exec("git fetch origin", tempDir);
+      if (!fetchResult.success) {
+        return {
+          success: false,
+          output: "",
+          error: `Failed to refresh markSource clone: ${fetchResult.error}`,
+        };
+      }
+    }
+
+    const checkoutResult = exec(`git checkout -B ${branch} origin/${branch}`, tempDir);
+    if (!checkoutResult.success) {
+      return {
+        success: false,
+        output: "",
+        error: `Failed to prepare branch '${branch}' in markSource clone: ${checkoutResult.error}`,
+      };
     }
 
     // Find README file (case-insensitive)
@@ -353,6 +443,9 @@ export function addSourceNotice(repoPath: string, publicUrl: string, branch: str
     exec(`git add "${readmeName}"`, tempDir);
     const commitResult = exec('git commit -m "Add source repository notice"', tempDir);
     if (!commitResult.success) {
+      if (commitResult.error?.includes("nothing to commit")) {
+        return { success: true, output: "Source notice already up to date" };
+      }
       return { success: false, output: "", error: `Failed to commit: ${commitResult.error}` };
     }
 
@@ -368,8 +461,7 @@ export function addSourceNotice(repoPath: string, publicUrl: string, branch: str
 
     return { success: true, output: "Source notice added" };
   } finally {
-    // Cleanup temp directory
-    if (existsSync(tempDir)) {
+    if (deleteClone && existsSync(tempDir)) {
       rmSync(tempDir, { recursive: true, force: true });
     }
   }

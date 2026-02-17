@@ -1,5 +1,5 @@
 import { rmSync } from "node:fs";
-import { ensureCacheDir, getRepoTempPath } from "./config.js";
+import { ensureCacheDir, getRepoTempPath, getWorkDir } from "./config.js";
 import {
   addRemote,
   addSourceNotice,
@@ -38,9 +38,13 @@ export interface PushResult {
   error?: string;
 }
 
-export function pull(repo: RepoConfig): PullResult {
-  ensureCacheDir();
-  const repoPath = getRepoTempPath(repo.name);
+export interface SyncOptions {
+  cacheDir?: string;
+}
+
+export function pull(repo: RepoConfig, options?: SyncOptions): PullResult {
+  ensureCacheDir(options?.cacheDir);
+  const repoPath = getRepoTempPath(repo.name, options?.cacheDir);
   const exists = repoExists(repoPath);
 
   if (exists) {
@@ -87,8 +91,8 @@ export function pull(repo: RepoConfig): PullResult {
   };
 }
 
-export function status(repo: RepoConfig): StatusResult {
-  const repoPath = getRepoTempPath(repo.name);
+export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
+  const repoPath = getRepoTempPath(repo.name, options?.cacheDir);
   const errors: string[] = [];
 
   const baseStatus: RepoStatus = {
@@ -175,8 +179,8 @@ export function status(repo: RepoConfig): StatusResult {
   };
 }
 
-export function push(repo: RepoConfig): PushResult {
-  const repoPath = getRepoTempPath(repo.name);
+export function push(repo: RepoConfig, options?: SyncOptions): PushResult {
+  const repoPath = getRepoTempPath(repo.name, options?.cacheDir);
 
   if (!repoExists(repoPath)) {
     return {
@@ -187,7 +191,7 @@ export function push(repo: RepoConfig): PushResult {
   }
 
   // Check status first (compares against parent of notice commit if markSource is enabled)
-  const statusResult = status(repo);
+  const statusResult = status(repo, options);
   if (!statusResult.canPush) {
     return {
       success: false,
@@ -207,7 +211,11 @@ export function push(repo: RepoConfig): PushResult {
   if (repo.markSource) {
     console.log("  Adding source notice to README...");
     const branch = getDefaultBranch(repoPath);
-    const noticeResult = addSourceNotice(repoPath, repo.public, branch);
+    const noticeResult = addSourceNotice(repoPath, repo.public, branch, {
+      cloneBaseDir: getWorkDir(options?.cacheDir),
+      deleteClone: repo.markSourceDeleteClone,
+      cloneName: repo.name,
+    });
     if (!noticeResult.success) {
       return {
         success: false,
@@ -234,8 +242,8 @@ export function push(repo: RepoConfig): PushResult {
   };
 }
 
-export function clean(repo: RepoConfig): void {
-  const repoPath = getRepoTempPath(repo.name);
+export function clean(repo: RepoConfig, options?: SyncOptions): void {
+  const repoPath = getRepoTempPath(repo.name, options?.cacheDir);
   if (repoExists(repoPath)) {
     rmSync(repoPath, { recursive: true, force: true });
   }

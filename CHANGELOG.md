@@ -8,6 +8,8 @@
 
 ### Changed
 
+- Added top-level `cacheDir` config to control repo cache location, and moved `markSource` working clones under `<cacheDir>/work/<repo-name>` with `markSourceDeleteClone` controlling cleanup ([#2](https://github.com/kcosr/repo-sync/pull/2))
+
 ### Fixed
 
 ### Removed

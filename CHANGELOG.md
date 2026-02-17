@@ -6,6 +6,8 @@
 
 ### Added
 
+- Added `build:bun` script to compile a standalone Bun executable at `./bin/repo-sync` ([#4](https://github.com/kcosr/repo-sync/pull/4))
+
 ### Changed
 
 ### Fixed

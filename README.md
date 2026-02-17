@@ -16,6 +16,7 @@ git clone https://github.com/kcosr/repo-sync.git
 cd repo-sync
 npm install
 npm run build
+npm run build:bun   # Optional: build standalone Bun executable at ./bin/repo-sync
 ```
 
 2. Edit `repo-sync.yaml` with your repos:
@@ -175,6 +176,15 @@ node dist/cli.js status
 
 # Review changes, then push
 node dist/cli.js push
+```
+
+## Standalone Binary
+
+Build a standalone executable with Bun:
+
+```bash
+npm run build:bun
+./bin/repo-sync --help
 ```
 
 ## License

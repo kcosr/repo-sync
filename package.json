@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:bun": "bun build --compile --outfile ./bin/repo-sync ./src/cli.ts",
     "dev": "tsc --watch",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",

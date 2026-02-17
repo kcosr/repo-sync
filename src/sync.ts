@@ -4,6 +4,7 @@ import {
   addRemote,
   addSourceNotice,
   cloneMirror,
+  cloneWorkDir,
   compareRefs,
   fetchOrigin,
   fetchRemote,
@@ -35,6 +36,12 @@ export interface StatusResult {
 export interface PushResult {
   success: boolean;
   pushed: boolean;
+  error?: string;
+}
+
+export interface CloneResult {
+  success: boolean;
+  clonePath: string;
   error?: string;
 }
 
@@ -247,6 +254,35 @@ export function clean(repo: RepoConfig, options?: SyncOptions): void {
   if (repoExists(repoPath)) {
     rmSync(repoPath, { recursive: true, force: true });
   }
+}
+
+export function clone(repo: RepoConfig, options?: SyncOptions): CloneResult {
+  const repoPath = getRepoTempPath(repo.name, options?.cacheDir);
+  const cloneBaseDir = getWorkDir(options?.cacheDir);
+  const clonePath = `${cloneBaseDir}/${repo.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+
+  if (!repoExists(repoPath)) {
+    return {
+      success: false,
+      clonePath,
+      error: "Not pulled yet. Run 'repo-sync pull' first.",
+    };
+  }
+
+  const branch = getDefaultBranch(repoPath);
+  const cloneResult = cloneWorkDir(repoPath, branch, cloneBaseDir, repo.name);
+  if (!cloneResult.success) {
+    return {
+      success: false,
+      clonePath: cloneResult.clonePath,
+      error: cloneResult.error,
+    };
+  }
+
+  return {
+    success: true,
+    clonePath: cloneResult.clonePath,
+  };
 }
 
 export function formatRefComparison(ref: RefComparison): string {

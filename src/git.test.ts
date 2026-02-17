@@ -1,7 +1,7 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compareRefs, exec } from "./git.js";
+import { cloneWorkDir, compareRefs, exec } from "./git.js";
 import type { RefComparison } from "./types.js";
 
 describe("git", () => {
@@ -18,6 +18,13 @@ describe("git", () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBeDefined();
+    });
+
+    it("should capture stdout on failed command", () => {
+      const result = exec(`bash -lc "echo nothing to commit; exit 1"`);
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("nothing to commit");
     });
 
     it("should execute in specified directory", () => {
@@ -81,6 +88,38 @@ describe("git", () => {
       };
 
       expect(result.status).toBe("missing");
+    });
+  });
+
+  describe("cloneWorkDir", () => {
+    const testDir = join(tmpdir(), `repo-sync-clone-test-${Date.now()}`);
+    const bareRepo = join(testDir, "source.git");
+    const seedRepo = join(testDir, "seed");
+    const workRoot = join(testDir, "work");
+
+    beforeAll(() => {
+      mkdirSync(testDir, { recursive: true });
+      exec(`git init --bare "${bareRepo}"`);
+      exec(`git clone "${bareRepo}" "${seedRepo}"`);
+      exec('git config user.email "test@example.com"', seedRepo);
+      exec('git config user.name "test"', seedRepo);
+      writeFileSync(join(seedRepo, "README.md"), "hello\n");
+      exec("git add README.md", seedRepo);
+      exec('git commit -m "init"', seedRepo);
+      exec("git push origin master", seedRepo);
+    });
+
+    afterAll(() => {
+      rmSync(testDir, { recursive: true, force: true });
+    });
+
+    it("should create and sanitize a work clone", () => {
+      const result = cloneWorkDir(bareRepo, "master", workRoot, "my/repo name");
+
+      expect(result.success).toBe(true);
+      expect(result.clonePath).toContain("my-repo-name");
+      expect(existsSync(result.clonePath)).toBe(true);
+      expect(existsSync(join(result.clonePath, "README.md"))).toBe(true);
     });
   });
 });

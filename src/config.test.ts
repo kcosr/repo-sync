@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findRepo, getRepoTempPath, loadConfig } from "./config.js";
+import { findRepo, getCacheDir, getRepoTempPath, getWorkDir, loadConfig } from "./config.js";
 
 describe("config", () => {
   const testDir = join(tmpdir(), `repo-sync-test-${Date.now()}`);
@@ -82,6 +82,52 @@ describe("config", () => {
 
       expect(() => loadConfig(testConfigPath)).toThrow("must have a 'private' URL");
     });
+
+    it("should load cacheDir and markSource options when provided", () => {
+      writeFileSync(
+        testConfigPath,
+        `cacheDir: /tmp/repo-sync-cache
+repos:
+  - name: test-repo
+    public: https://github.com/org/test.git
+    private: git@private.com:vendor/test.git
+    markSource: true
+    markSourceDeleteClone: false
+`,
+      );
+
+      const config = loadConfig(testConfigPath);
+
+      expect(config.cacheDir).toBe("/tmp/repo-sync-cache");
+      expect(config.repos[0].markSourceDeleteClone).toBe(false);
+    });
+
+    it("should throw if cacheDir is not a string", () => {
+      writeFileSync(testConfigPath, "cacheDir: 123\nrepos: []\n");
+
+      expect(() => loadConfig(testConfigPath)).toThrow("Config 'cacheDir' must be a string");
+    });
+
+    it("should throw if cacheDir is empty", () => {
+      writeFileSync(testConfigPath, "cacheDir: ''\nrepos: []\n");
+
+      expect(() => loadConfig(testConfigPath)).toThrow("Config 'cacheDir' cannot be empty");
+    });
+
+    it("should throw if markSourceDeleteClone is not a boolean", () => {
+      writeFileSync(
+        testConfigPath,
+        `repos:
+  - name: test-repo
+    public: https://github.com/org/test.git
+    private: git@private.com:vendor/test.git
+    markSourceDeleteClone: nope
+`,
+      );
+
+      expect(() => loadConfig(testConfigPath)).toThrow("invalid 'markSourceDeleteClone'");
+    });
+
   });
 
   describe("findRepo", () => {
@@ -116,6 +162,35 @@ describe("config", () => {
 
       expect(path).toContain("my-repo.git");
       expect(path).toContain(".repo-sync");
+    });
+
+    it("should use custom cacheDir when provided", () => {
+      const path = getRepoTempPath("my-repo", "/tmp/custom-cache");
+
+      expect(path).toBe("/tmp/custom-cache/repos/my-repo.git");
+    });
+  });
+
+  describe("getCacheDir", () => {
+    it("should use default cache dir when not configured", () => {
+      const path = getCacheDir({ repos: [] });
+
+      expect(path).toContain(".repo-sync");
+    });
+
+    it("should resolve ~/ paths", () => {
+      const path = getCacheDir({ cacheDir: "~/repo-sync-cache", repos: [] });
+
+      expect(path).toContain("repo-sync-cache");
+      expect(path.includes("~/")).toBe(false);
+    });
+  });
+
+  describe("getWorkDir", () => {
+    it("should place work clones under cacheDir/work", () => {
+      const path = getWorkDir("/tmp/custom-cache");
+
+      expect(path).toBe("/tmp/custom-cache/work");
     });
   });
 });

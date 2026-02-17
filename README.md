@@ -20,10 +20,14 @@ npm run build
 
 2. Edit `repo-sync.yaml` with your repos:
 ```yaml
+cacheDir: /Users/you/.repo-sync
+
 repos:
   - name: lodash
     public: https://github.com/lodash/lodash.git
     private: git@gitlab.company.com:vendor/lodash.git
+    markSource: true
+    markSourceDeleteClone: false
   - name: express
     public: https://github.com/expressjs/express.git
     private: git@gitlab.company.com:vendor/express.git
@@ -87,7 +91,7 @@ node dist/cli.js push lodash       # Push a specific repo
 
 ### `clean [repo-name]`
 
-Remove cached clones from `~/.repo-sync/repos/`.
+Remove cached mirror clones from `<cacheDir>/repos/` (default: `~/.repo-sync/repos/`).
 
 ```bash
 node dist/cli.js clean             # Clean all
@@ -106,11 +110,14 @@ node dist/cli.js clean lodash      # Clean specific repo
 Edit `repo-sync.yaml` in this repo:
 
 ```yaml
+cacheDir: <path>            # Optional: root data dir (default: ~/.repo-sync)
+
 repos:
   - name: repo-name          # Identifier (used in commands and cache storage)
     public: <url>            # Public repo URL (HTTPS, no auth needed)
     private: <url>           # Private repo URL (SSH or HTTPS with auth)
     markSource: true         # Optional: add notice to README showing source
+    markSourceDeleteClone: false     # Optional: delete markSource working clone after push (default: true)
 ```
 
 ### `markSource` Option
@@ -126,9 +133,17 @@ When `markSource: true` is set, the tool adds a notice to the top of the README 
 
 This adds one commit on top of the public history. On each sync, this commit is recreated.
 
+When `markSource` is enabled, these optional per-repo settings control the working clone used to create that commit:
+
+- `markSourceDeleteClone`: Whether to delete the working clone after each push. Defaults to `true`.
+
+If `markSourceDeleteClone: false`, the tool keeps and reuses a clone at:
+
+`<cacheDir>/work/<repo-name>` (default: `~/.repo-sync/work/<repo-name>`)
+
 ## How It Works
 
-1. **Pull**: Does `git clone --mirror` (or `git fetch --prune`) from public into `~/.repo-sync/repos/<name>.git`
+1. **Pull**: Does `git clone --mirror` (or `git fetch --prune`) from public into `<cacheDir>/repos/<name>.git` (default: `~/.repo-sync/repos/<name>.git`)
 
 2. **Status**: Fetches refs from private, compares with cached clone, shows what's new/changed
 

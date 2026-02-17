@@ -6,9 +6,14 @@
 
 ### Added
 
+- Added `clone` command to create/update local work clones at `<cacheDir>/work/<repo-name>` from cached mirrors ([#3](https://github.com/kcosr/repo-sync/pull/3))
+
 ### Changed
 
 ### Fixed
+
+- Fixed failed `git commit` handling to capture stdout so "nothing to commit" is treated as up-to-date during `markSource` runs ([#3](https://github.com/kcosr/repo-sync/pull/3))
+- Fixed push ref syncing to avoid pushing remote-tracking refs by using explicit branch/tag refspecs with prune ([#3](https://github.com/kcosr/repo-sync/pull/3))
 
 ### Removed
 

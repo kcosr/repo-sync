@@ -20,6 +20,13 @@ describe("git", () => {
       expect(result.error).toBeDefined();
     });
 
+    it("should capture stdout on failed command", () => {
+      const result = exec(`bash -lc "echo nothing to commit; exit 1"`);
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("nothing to commit");
+    });
+
     it("should execute in specified directory", () => {
       const result = exec("pwd", "/tmp");
 

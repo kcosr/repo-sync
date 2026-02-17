@@ -147,9 +147,9 @@ If `markSourceDeleteClone: false`, the tool keeps and reuses a clone at:
 
 2. **Status**: Fetches refs from private, compares with cached clone, shows what's new/changed
 
-3. **Push**: Does `git push --mirror` to private, syncing all branches, tags, and refs
+3. **Push**: Pushes branches and tags to private with prune, syncing updates and deletions
 
-The `--mirror` flag ensures an exact copy - all branches, all tags, all history.
+Push sync keeps branches/tags aligned with public history.
 
 ## Typical Workflow
 

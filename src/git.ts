@@ -21,11 +21,11 @@ export function exec(command: string, cwd?: string, silent = true): ExecResult {
     const output = execSync(command, options) as string;
     return { success: true, output: output?.trim() || "" };
   } catch (err) {
-    const error = err as Error & { stderr?: string };
+    const error = err as Error & { stderr?: string; stdout?: string };
     return {
       success: false,
-      output: "",
-      error: error.stderr || error.message,
+      output: error.stdout?.trim() || "",
+      error: error.stderr?.trim() || error.message,
     };
   }
 }
@@ -56,7 +56,11 @@ export function fetchRemote(repoPath: string, remoteName: string): ExecResult {
 }
 
 export function pushMirror(repoPath: string, remoteName: string): ExecResult {
-  return exec(`git push --mirror ${remoteName}`, repoPath, false);
+  return exec(
+    `git push --prune ${remoteName} "+refs/heads/*:refs/heads/*" "+refs/tags/*:refs/tags/*"`,
+    repoPath,
+    false,
+  );
 }
 
 export function getLocalRefs(repoPath: string): Map<string, string> {
@@ -443,7 +447,10 @@ export function addSourceNotice(
     exec(`git add "${readmeName}"`, tempDir);
     const commitResult = exec('git commit -m "Add source repository notice"', tempDir);
     if (!commitResult.success) {
-      if (commitResult.error?.includes("nothing to commit")) {
+      if (
+        commitResult.error?.includes("nothing to commit") ||
+        commitResult.output?.includes("nothing to commit")
+      ) {
         return { success: true, output: "Source notice already up to date" };
       }
       return { success: false, output: "", error: `Failed to commit: ${commitResult.error}` };

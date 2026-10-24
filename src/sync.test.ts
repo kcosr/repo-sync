@@ -134,6 +134,26 @@ describe("sync", () => {
       expect(result).toContain("Up to date ✓");
     });
 
+    it("reports a banner-only change instead of claiming the repository is up to date", () => {
+      const result = formatStatus({
+        status: {
+          name: "tool",
+          source: "archive",
+          privateUrl: "private.git",
+          pulled: true,
+          sourceNoticeChanged: true,
+          branches: [{ name: "main", localRef: "abc123", privateRef: "abc123", status: "same" }],
+          tags: [],
+        },
+        canPush: true,
+        hasChanges: true,
+        errors: [],
+      });
+
+      expect(result).toContain("Source notice: update pending");
+      expect(result).not.toContain("Up to date");
+    });
+
     it("should format status with changes", () => {
       const result = formatStatus({
         status: {

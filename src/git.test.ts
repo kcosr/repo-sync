@@ -2,14 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  cloneWorkDir,
-  compareRefs,
-  exec,
-  getLocalRefs,
-  getParentCommit,
-  isSourceNoticeCommit,
-} from "./git.js";
+import { cloneWorkDir, compareRefs, exec, getLocalRefs, getParentCommit, pushRefs } from "./git.js";
 import type { RefComparison } from "./types.js";
 
 describe("git", () => {
@@ -258,7 +251,6 @@ describe("git", () => {
 
       expect(result.success).toBe(true);
       expect(getParentCommit(result.clonePath, branch)).toBe(parent);
-      expect(isSourceNoticeCommit(result.clonePath, branch)).toBe(false);
       expect(git(result.clonePath, "rev-parse", "HEAD")).toBe(git(seedRepo, "rev-parse", "HEAD"));
       expect(existsSync(marker)).toBe(false);
     });
@@ -283,6 +275,72 @@ describe("git", () => {
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/commits that are not in the cache/);
       expect(git(result.clonePath, "rev-parse", "HEAD")).toBe(localHead);
+    });
+
+    it.each(["remote branch", "tag"])(
+      "allows a detached HEAD preserved only by a cached %s",
+      (refType) => {
+        git(seedRepo, "checkout", "--detach");
+        git(seedRepo, "commit", "--allow-empty", "-m", "release only");
+        const releaseCommit = git(seedRepo, "rev-parse", "HEAD");
+        if (refType === "remote branch") {
+          git(seedRepo, "push", "origin", "HEAD:refs/heads/release");
+        } else {
+          git(seedRepo, "tag", "--annotate", "release", "--message", "release");
+          git(seedRepo, "push", "origin", "refs/tags/release");
+        }
+
+        const initial = refresh();
+        expect(initial.success).toBe(true);
+        git(initial.clonePath, "checkout", "--detach", releaseCommit);
+        expect(git(initial.clonePath, "for-each-ref", "--contains", "HEAD", "refs/heads/")).toBe(
+          "",
+        );
+
+        const result = refresh();
+
+        expect(result.success).toBe(true);
+        expect(git(result.clonePath, "symbolic-ref", "--short", "HEAD")).toBe("main");
+        const preservedRef =
+          refType === "remote branch" ? "origin/release" : "refs/tags/release^{}";
+        expect(git(result.clonePath, "rev-parse", preservedRef)).toBe(releaseCommit);
+      },
+    );
+
+    it("does not partially push branch updates when the destination rejects a tag", () => {
+      const originalCommit = git(bareRepo, "rev-parse", "refs/heads/main");
+      git(seedRepo, "commit", "--allow-empty", "-m", "update");
+      git(seedRepo, "branch", "new-feature");
+      git(seedRepo, "tag", "--force", "v1");
+
+      const result = pushRefs(seedRepo, "origin");
+
+      expect(result.success).toBe(false);
+      expect(git(bareRepo, "rev-parse", "refs/heads/main")).toBe(originalCommit);
+      expect(git(bareRepo, "rev-parse", "refs/tags/v1")).toBe(originalCommit);
+      expect(git(bareRepo, "for-each-ref", "refs/heads/new-feature")).toBe("");
+    });
+
+    it("rejects a stale notice lease atomically when the destination changes", () => {
+      const expected = git(bareRepo, "rev-parse", "refs/heads/main");
+      git(seedRepo, "commit", "--allow-empty", "-m", "concurrent destination work");
+      git(seedRepo, "push", "origin", "main");
+      const concurrent = git(bareRepo, "rev-parse", "refs/heads/main");
+      git(seedRepo, "reset", "--hard", expected);
+      git(seedRepo, "commit", "--allow-empty", "-m", "replacement notice");
+      const replacement = git(seedRepo, "rev-parse", "HEAD");
+
+      const result = pushRefs(seedRepo, "origin", {
+        refs: new Map([
+          ["heads/main", replacement],
+          ["heads/new-feature", replacement],
+        ]),
+        noticeLease: { branch: "main", expected },
+      });
+
+      expect(result.success).toBe(false);
+      expect(git(bareRepo, "rev-parse", "refs/heads/main")).toBe(concurrent);
+      expect(git(bareRepo, "for-each-ref", "refs/heads/new-feature")).toBe("");
     });
 
     it("preserves detached commits until they have a branch", () => {

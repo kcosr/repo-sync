@@ -1,18 +1,20 @@
 export type RepoSource = "remote" | "archive";
 
-export interface RemoteRepoConfig {
+export type SourceNoticeMode = "linked" | "generic" | "none";
+
+interface RepoConfigBase {
   name: string;
-  source?: "remote";
-  public: string;
   private: string;
-  markSource?: boolean;
-  markSourceDeleteClone?: boolean;
+  sourceNotice?: SourceNoticeMode;
 }
 
-export interface ArchiveRepoConfig {
-  name: string;
+export interface RemoteRepoConfig extends RepoConfigBase {
+  source?: "remote";
+  public: string;
+}
+
+export interface ArchiveRepoConfig extends RepoConfigBase {
   source: "archive";
-  private: string;
 }
 
 export type RepoConfig = RemoteRepoConfig | ArchiveRepoConfig;
@@ -44,6 +46,7 @@ export interface RepoStatus {
   privateUrl: string;
   pulled: boolean;
   pulledAt?: Date;
+  sourceNoticeChanged?: boolean;
   branches: RefComparison[];
   tags: RefComparison[];
   error?: string;

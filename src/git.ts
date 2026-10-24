@@ -1,6 +1,5 @@
 import { type ExecSyncOptions, execSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { RefComparison } from "./types.js";
 
@@ -68,24 +67,50 @@ export function addRemote(repoPath: string, name: string, url: string): ExecResu
 }
 
 export function fetchRemote(repoPath: string, remoteName: string, prune = false): ExecResult {
-  return exec(`git fetch ${prune ? "--prune " : ""}${remoteName}`, repoPath);
+  return execGit(["fetch", "--no-tags", ...(prune ? ["--prune"] : []), remoteName], repoPath);
 }
 
-export function pushMirror(repoPath: string, remoteName: string): ExecResult {
-  return exec(
-    `git push --prune ${remoteName} "+refs/heads/*:refs/heads/*" "+refs/tags/*:refs/tags/*"`,
+export function getRemoteBranchHead(
+  repoPath: string,
+  remoteName: string,
+  branch: string,
+): ExecResult {
+  const result = execGit(
+    ["ls-remote", "--exit-code", "--refs", remoteName, `refs/heads/${branch}`],
     repoPath,
-    false,
   );
+  return { ...result, output: result.output.split(/\s/)[0] ?? "" };
 }
 
-export function pushRefs(repoPath: string, remoteName: string): ExecResult {
-  // Archive-managed refs only move forward and are never deleted on the remote.
-  return exec(
-    `git push ${remoteName} "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*"`,
-    repoPath,
-    false,
-  );
+export interface PushRefsOptions {
+  refs?: Map<string, string>;
+  privateRefs?: Map<string, string>;
+  mirror?: boolean;
+  noticeLease?: { branch: string; expected: string };
+}
+
+export function pushRefs(
+  repoPath: string,
+  remoteName: string,
+  options: PushRefsOptions = {},
+): ExecResult {
+  const refs = options.refs ?? getLocalRefs(repoPath);
+  const leaseRef = options.noticeLease ? `heads/${options.noticeLease.branch}` : undefined;
+  const args = ["push", "--atomic"];
+  if (options.noticeLease) {
+    args.push(`--force-with-lease=refs/${leaseRef}:${options.noticeLease.expected}`);
+  }
+  args.push(remoteName);
+  for (const [ref, sha] of refs) {
+    const force = options.mirror && ref !== leaseRef ? "+" : "";
+    args.push(`${force}${sha}:refs/${ref}`);
+  }
+  if (options.mirror) {
+    for (const ref of options.privateRefs?.keys() ?? []) {
+      if (!refs.has(ref)) args.push(`:refs/${ref}`);
+    }
+  }
+  return execGit(args, repoPath, false);
 }
 
 export function isImportedCache(repoPath: string): boolean {
@@ -300,41 +325,13 @@ export function getParentCommit(repoPath: string, commitRef: string): string | n
   return null;
 }
 
-export function isSourceNoticeCommit(repoPath: string, commitRef: string): boolean {
-  // Check if the commit message matches our notice commit
-  const result = execGit(["log", "-1", "--format=%s", commitRef], repoPath);
-  if (result.success) {
-    return result.output === "Add source repository notice";
-  }
-  return false;
-}
-
-export interface SourceNoticeOptions {
-  cloneBaseDir?: string;
-  deleteClone?: boolean;
-  cloneName?: string;
-}
-
 function sanitizeCloneName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "-");
 }
 
-function getWorkClonePath(options?: SourceNoticeOptions): {
-  clonePath: string;
-  deleteClone: boolean;
-} {
-  const cloneBaseDir = options?.cloneBaseDir || tmpdir();
-  const deleteClone = options?.deleteClone ?? true;
-  const cloneName = options?.cloneName ? sanitizeCloneName(options.cloneName) : "repo-sync-work";
-  const clonePath = deleteClone
-    ? join(cloneBaseDir, `repo-sync-${Date.now()}`)
-    : join(cloneBaseDir, cloneName);
-  return { clonePath, deleteClone };
-}
-
 /**
  * Report commits a refresh cannot preserve: local commits on the target branch,
- * or a detached HEAD that no other branch contains.
+ * or a detached HEAD that no branch, tag, or cached remote branch contains.
  */
 function findUnpreservedCommits(clonePath: string, branch: string): string | undefined {
   const target = `refs/remotes/origin/${branch}`;
@@ -347,12 +344,20 @@ function findUnpreservedCommits(clonePath: string, branch: string): string | und
   }
   const head = exec("git rev-parse --verify --quiet HEAD", clonePath);
   if (head.success && !isAncestor(clonePath, "HEAD", target)) {
-    const branches = exec(
-      "git for-each-ref --contains HEAD --format='%(refname)' refs/heads/",
+    const refs = execGit(
+      [
+        "for-each-ref",
+        "--contains",
+        "HEAD",
+        "--format=%(refname)",
+        "refs/heads/",
+        "refs/remotes/origin/",
+        "refs/tags/",
+      ],
       clonePath,
     );
-    if (!branches.success || branches.output.length === 0) {
-      return `Work clone HEAD has commits that are not on any branch or in the cache: ${clonePath}. Create a branch for them before running clone.`;
+    if (!refs.success || refs.output.length === 0) {
+      return `Work clone HEAD has commits that are not on any branch, tag, or in the cache: ${clonePath}. Create a branch for them before running clone.`;
     }
   }
   return undefined;
@@ -519,116 +524,4 @@ export function cloneWorkDir(
     output: "Work clone ready",
     clonePath,
   };
-}
-
-export function addSourceNotice(
-  repoPath: string,
-  publicUrl: string,
-  branch: string,
-  options?: SourceNoticeOptions,
-): ExecResult {
-  const { clonePath: tempDir, deleteClone } = getWorkClonePath(options);
-
-  try {
-    const prepareResult = prepareWorkClone(repoPath, branch, tempDir);
-    if (!prepareResult.success) {
-      return {
-        success: false,
-        output: "",
-        error: prepareResult.error,
-      };
-    }
-
-    // Find README file (case-insensitive)
-    const readmeNames = [
-      "README.md",
-      "readme.md",
-      "README.MD",
-      "README",
-      "readme",
-      "README.txt",
-      "readme.txt",
-    ];
-    let readmePath: string | null = null;
-    let readmeName: string | null = null;
-
-    for (const name of readmeNames) {
-      const path = join(tempDir, name);
-      if (existsSync(path)) {
-        readmePath = path;
-        readmeName = name;
-        break;
-      }
-    }
-
-    if (!readmePath || !readmeName) {
-      // No README found, create one
-      readmePath = join(tempDir, "README.md");
-      readmeName = "README.md";
-      writeFileSync(readmePath, "");
-    }
-
-    // Read current content
-    const currentContent = readFileSync(readmePath, "utf-8");
-
-    // Check if notice already exists (from previous sync)
-    const noticeMarker = "<!-- repo-sync-source-notice -->";
-    let newContent: string;
-
-    if (currentContent.includes(noticeMarker)) {
-      // Replace existing notice
-      newContent = currentContent.replace(
-        /<!-- repo-sync-source-notice -->[\s\S]*?<!-- end-repo-sync-source-notice -->\n*/,
-        "",
-      );
-    } else {
-      newContent = currentContent;
-    }
-
-    // Prepend notice
-    const notice = `${noticeMarker}
-> **📦 Mirrored Repository**
->
-> This repository is automatically mirrored from [${publicUrl}](${publicUrl}).
-> Do not commit directly to this repository.
-<!-- end-repo-sync-source-notice -->
-
-`;
-
-    newContent = notice + newContent;
-    writeFileSync(readmePath, newContent);
-
-    // Configure git user for the commit
-    exec('git config user.email "repo-sync@localhost"', tempDir);
-    exec('git config user.name "repo-sync"', tempDir);
-
-    // Commit the change
-    exec(`git add "${readmeName}"`, tempDir);
-    const commitResult = exec('git commit -m "Add source repository notice"', tempDir);
-    if (!commitResult.success) {
-      if (
-        commitResult.error?.includes("nothing to commit") ||
-        commitResult.output?.includes("nothing to commit")
-      ) {
-        return { success: true, output: "Source notice already up to date" };
-      }
-      return { success: false, output: "", error: `Failed to commit: ${commitResult.error}` };
-    }
-
-    // Push back to the bare repo
-    const pushResult = execGit(["push", "origin", branch], tempDir);
-    if (!pushResult.success) {
-      return {
-        success: false,
-        output: "",
-        error: `Failed to push to bare repo: ${pushResult.error}`,
-      };
-    }
-
-    return { success: true, output: "Source notice added" };
-  } finally {
-    if (deleteClone && existsSync(tempDir)) {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }
 }

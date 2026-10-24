@@ -29,8 +29,7 @@ repos:
   - name: lodash
     public: https://github.com/lodash/lodash.git
     private: git@gitlab.company.com:vendor/lodash.git
-    markSource: true
-    markSourceDeleteClone: false
+    sourceNotice: linked
   - name: express
     public: https://github.com/expressjs/express.git
     private: git@gitlab.company.com:vendor/express.git
@@ -100,7 +99,7 @@ node dist/cli.js import my-tool \
 
 ### `push [repo-name]`
 
-Push to private mirrors. Only pushes if local (from public) is ahead of private.
+Push cached branches and tags to private mirrors and apply the configured source notice.
 
 ```bash
 node dist/cli.js push              # Push all repos
@@ -108,7 +107,7 @@ node dist/cli.js push lodash       # Push a specific repo
 ```
 
 **Safety checks:**
-- Won't push if private has commits not in public (shouldn't happen)
+- Protects private commits beyond recognized generated source notices
 - Won't push if refs have diverged (needs manual intervention)
 - Skips repos that are already up to date
 
@@ -142,36 +141,40 @@ repos:
   - name: repo-name          # Identifier (used in commands and cache storage)
     public: <url>            # Public repo URL (HTTPS, no auth needed)
     private: <url>           # Private repo URL (SSH or HTTPS with auth)
-    markSource: true         # Optional: add notice to README showing source
-    markSourceDeleteClone: false     # Optional: delete markSource working clone after push (default: true)
+    sourceNotice: linked     # Optional: linked, generic or none (default: none)
 
   - name: local-id           # Identifier; independent of the archive and private repo names
     source: archive          # Seeded and updated by `import`; no public URL
     private: <url>           # Private repo URL
+    sourceNotice: generic    # Optional: archives support generic or none
 ```
 
-`source` defaults to `remote`. Archive-managed entries cannot set `public`, `markSource` or `markSourceDeleteClone`.
+`source` defaults to `remote`. Archive-managed entries cannot set `public` or use a linked source notice.
 
-### `markSource` Option
+### Source notices
 
-When `markSource: true` is set, the tool adds a notice to the top of the README indicating where the repository was mirrored from:
+Set `sourceNotice` independently for each repository:
 
-```markdown
+| Mode | Generated README banner | Sources |
+|------|-------------------------|---------|
+| `linked` | A mirror notice linking to the configured `public` URL | Remote only |
+| `generic` | A mirror notice without a source URL | Remote or archive |
+| `none` | No generated notice (default) | Remote or archive |
+
+The generic banner uses the same format as the linked banner:
+
 > **📦 Mirrored Repository**
 >
-> This repository is automatically mirrored from [https://github.com/org/repo](https://github.com/org/repo).
+> This repository is automatically mirrored from an external repository.
 > Do not commit directly to this repository.
-```
 
-This adds one commit on top of the public history. On each sync, this commit is recreated.
+Enabled notices add one generated commit above the source tip on the private default branch. Cached source branches and work clones stay unchanged, preserving the original source commits and their IDs. Switching to `none` restores the source branch tip without a generated notice. Replacing or removing a verified generated notice uses an exact `--force-with-lease` check to protect unrelated private commits.
 
-When `markSource` is enabled, these optional per-repo settings control the working clone used to create that commit:
+Notice settings control the generated banner only: `generic` does not remove URLs already present in repository files, configuration or history.
 
-- `markSourceDeleteClone`: Whether to delete the working clone after each push. Defaults to `true`.
+Existing configurations may use `markSource: true` for `linked` or `markSource: false` for `none`. Setting both `markSource` and `sourceNotice` is an error. Archive entries reject `linked`, including legacy `markSource: true`; use `sourceNotice: generic` for an archive notice.
 
-If `markSourceDeleteClone: false`, the tool keeps and reuses a clone at:
-
-`<cacheDir>/work/<repo-name>` (default: `~/.repo-sync/work/<repo-name>`)
+The obsolete `markSourceDeleteClone` setting is rejected. Notices no longer create work clones; use `repo-sync clone` when you want a working checkout.
 
 ## Archive imports
 
@@ -202,7 +205,7 @@ A new cache uses the archive's default branch. For a detached HEAD, it selects a
 For archive-managed entries:
 
 - `pull` skips them in broad runs and refuses them by name.
-- `push` never force-pushes or prunes, so refs that exist only on private are kept. `status` lists them as `Kept on private`.
+- `push` requires source branch updates to fast-forward and keeps refs that exist only on private. Replacing a verified generated notice is the sole force-with-lease exception. `status` lists private-only refs as `Kept on private`.
 - `status` and `push` fail if private cannot be fetched, rather than trusting stale refs.
 - `clone` fetches all cached branches, only fast-forwards an existing work clone and refuses to drop its local commits, including commits on a detached HEAD.
 
@@ -213,7 +216,7 @@ Import never changes work clones. Repositories configured with a public URL reta
 ```bash
 node dist/cli.js import my-tool --archive my-tool_source.zip
 node dist/cli.js status my-tool   # Compare imported branches and tags with private
-node dist/cli.js push my-tool     # Publish (fast-forward only, no deletions)
+node dist/cli.js push my-tool     # Publish branches/tags; keep private-only refs
 node dist/cli.js clone my-tool    # Working clone at <cacheDir>/work/my-tool
 ```
 
@@ -227,7 +230,7 @@ node dist/cli.js clone my-tool    # Working clone at <cacheDir>/work/my-tool
 
 4. **Push**: Pushes branches and tags to private with prune, syncing updates and deletions
 
-Push sync keeps branches/tags aligned with public history. For archive-managed entries, push only fast-forwards and never deletes.
+Push sync keeps branches/tags aligned with public history. Archive-managed entries preserve private-only refs and reject source-history rewrites; source notices follow the checks described above.
 
 ## Typical Workflow
 

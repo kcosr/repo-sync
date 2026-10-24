@@ -47,6 +47,7 @@ describe("config", () => {
       expect(repo.name).toBe("test-repo");
       expect(repo.public).toBe("https://github.com/org/test-repo.git");
       expect(repo.private).toBe("git@private.com:vendor/test-repo.git");
+      expect(repo.sourceNotice).toBe("none");
       expect(isArchiveRepo(repo)).toBe(false);
     });
 
@@ -96,7 +97,7 @@ describe("config", () => {
       expect(() => loadConfig(testConfigPath)).toThrow("must have a 'private' URL");
     });
 
-    it("should load cacheDir and markSource options when provided", () => {
+    it("should load cacheDir and normalize legacy markSource options", () => {
       writeFileSync(
         testConfigPath,
         `cacheDir: /tmp/repo-sync-cache
@@ -105,14 +106,14 @@ repos:
     public: https://github.com/org/test.git
     private: git@private.com:vendor/test.git
     markSource: true
-    markSourceDeleteClone: false
 `,
       );
 
       const config = loadConfig(testConfigPath);
 
       expect(config.cacheDir).toBe("/tmp/repo-sync-cache");
-      expect((config.repos[0] as RemoteRepoConfig).markSourceDeleteClone).toBe(false);
+      expect(config.repos[0].sourceNotice).toBe("linked");
+      expect(config.repos[0]).not.toHaveProperty("markSource");
     });
 
     it("should throw if cacheDir is not a string", () => {
@@ -127,18 +128,15 @@ repos:
       expect(() => loadConfig(testConfigPath)).toThrow("Config 'cacheDir' cannot be empty");
     });
 
-    it("should throw if markSourceDeleteClone is not a boolean", () => {
+    it.each(["remote", "archive"])("rejects obsolete clone options for %s repos", (source) => {
       writeFileSync(
         testConfigPath,
-        `repos:
-  - name: test-repo
-    public: https://github.com/org/test.git
-    private: git@private.com:vendor/test.git
-    markSourceDeleteClone: nope
-`,
+        `repos:\n  - name: test-repo\n    source: ${source}\n    private: git@private.com:vendor/test.git\n${source === "remote" ? "    public: https://github.com/org/test.git\n" : ""}    markSourceDeleteClone: false\n`,
       );
 
-      expect(() => loadConfig(testConfigPath)).toThrow("invalid 'markSourceDeleteClone'");
+      expect(() => loadConfig(testConfigPath)).toThrow(
+        "cannot set 'markSourceDeleteClone': sourceNotice no longer creates work clones; use 'repo-sync clone'",
+      );
     });
 
     it("should load archive-managed repos without a public URL", () => {
@@ -159,25 +157,97 @@ repos:
 
       expect(isArchiveRepo(config.repos[0])).toBe(true);
       expect(config.repos[0].private).toBe("git@private.com:vendor/destination-name.git");
+      expect(config.repos[0].sourceNotice).toBe("none");
       expect(isArchiveRepo(config.repos[1])).toBe(false);
     });
 
-    it.each([
-      "public: https://github.com/org/tool.git",
-      "markSource: true",
-      "markSourceDeleteClone: false",
-    ])("should reject archive-managed repos that set %s", (setting) => {
+    it("should reject archive-managed repos that set public", () => {
       writeFileSync(
         testConfigPath,
         `repos:
   - name: tool
     source: archive
     private: git@private.com:vendor/tool.git
-    ${setting}
+    public: https://github.com/org/tool.git
 `,
       );
 
       expect(() => loadConfig(testConfigPath)).toThrow("is archive-managed and cannot set");
+    });
+
+    describe("sourceNotice", () => {
+      function writeRepo(source: "remote" | "archive", settings: string): void {
+        writeFileSync(
+          testConfigPath,
+          `repos:\n  - name: tool\n    source: ${source}\n    private: git@private.com:vendor/tool.git\n${source === "remote" ? "    public: https://github.com/org/tool.git\n" : ""}${settings}`,
+        );
+      }
+
+      it.each(["linked", "generic", "none"])("loads remote mode %s", (mode) => {
+        writeRepo("remote", `    sourceNotice: ${mode}\n`);
+
+        expect(loadConfig(testConfigPath).repos[0].sourceNotice).toBe(mode);
+      });
+
+      it.each(["generic", "none"])("loads archive mode %s", (mode) => {
+        writeRepo("archive", `    sourceNotice: ${mode}\n`);
+
+        expect(loadConfig(testConfigPath).repos[0].sourceNotice).toBe(mode);
+      });
+
+      it.each([
+        [true, "linked"],
+        [false, "none"],
+      ])("normalizes legacy markSource: %s to %s", (legacy, mode) => {
+        writeRepo("remote", `    markSource: ${legacy}\n`);
+
+        const repo = loadConfig(testConfigPath).repos[0];
+        expect(repo.sourceNotice).toBe(mode);
+        expect(repo).not.toHaveProperty("markSource");
+      });
+
+      it("accepts legacy markSource: false for archives", () => {
+        writeRepo("archive", "    markSource: false\n");
+
+        const repo = loadConfig(testConfigPath).repos[0];
+        expect(repo.sourceNotice).toBe("none");
+        expect(repo).not.toHaveProperty("markSource");
+      });
+
+      it.each(["sourceNotice: linked", "markSource: true"])(
+        "rejects archive %s with generic guidance",
+        (setting) => {
+          writeRepo("archive", `    ${setting}\n`);
+
+          expect(() => loadConfig(testConfigPath)).toThrow(
+            "cannot use sourceNotice: linked; use sourceNotice: generic",
+          );
+        },
+      );
+
+      it.each([
+        ["linked", true],
+        ["none", false],
+        ["generic", false],
+      ])("rejects sourceNotice: %s with markSource: %s", (mode, legacy) => {
+        writeRepo("remote", `    sourceNotice: ${mode}\n    markSource: ${legacy}\n`);
+
+        expect(() => loadConfig(testConfigPath)).toThrow(
+          "cannot set both 'sourceNotice' and 'markSource'",
+        );
+      });
+
+      it.each(["custom", "true", "null", "''"])("rejects invalid mode %s", (mode) => {
+        writeRepo("remote", `    sourceNotice: ${mode}\n`);
+
+        expect(() => loadConfig(testConfigPath)).toThrow("invalid 'sourceNotice'");
+      });
+
+      it.each(["'true'", "1", "null"])("rejects nonboolean legacy value %s", (value) => {
+        writeRepo("remote", `    markSource: ${value}\n`);
+
+        expect(() => loadConfig(testConfigPath)).toThrow("invalid 'markSource': expected boolean");
+      });
     });
 
     it("should require a private URL for archive-managed repos", () => {

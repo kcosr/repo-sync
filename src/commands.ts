@@ -178,11 +178,6 @@ async function commandImport(
   }
 
   if (!result.success) {
-    if (result.outcome) {
-      // The cache changed but recording provenance failed.
-      console.error(`  ✗ ${result.error}`);
-      return 1;
-    }
     console.error(`  ✗ Import rejected: ${result.error}`);
     if (result.record) {
       console.error(`  Previous cache state preserved. Provenance: ${result.provenancePath}`);

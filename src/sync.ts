@@ -152,13 +152,25 @@ export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
   baseStatus.pulled = true;
   if (archive) {
     baseStatus.lastImport = getLastImport(repo.name, options?.cacheDir);
+    // Imports never rewrite cache configuration, so pick up private URL changes here.
+    const remoteResult = addRemote(repoPath, "private", repo.private);
+    if (!remoteResult.success) {
+      const error = `Failed to configure private remote: ${remoteResult.error}`;
+      return {
+        status: { ...baseStatus, error },
+        canPush: false,
+        hasChanges: false,
+        errors: [error],
+      };
+    }
   } else {
     baseStatus.pulledAt = getRepoCloneTime(repoPath);
   }
 
   // Fetch from private to compare
   console.log("  Fetching refs from private remote...");
-  const fetchResult = fetchRemote(repoPath, "private");
+  // Archive entries prune so refs deleted on (or left behind by a previous) private URL vanish.
+  const fetchResult = fetchRemote(repoPath, "private", archive);
   if (!fetchResult.success) {
     // This might be expected if private repo is empty or doesn't exist yet
     console.log("  Note: Could not fetch from private (may be empty or new)");
@@ -307,7 +319,9 @@ export function clone(repo: RepoConfig, options?: SyncOptions): CloneResult {
   }
 
   const branch = getDefaultBranch(repoPath);
-  const cloneResult = cloneWorkDir(repoPath, branch, cloneBaseDir, repo.name);
+  const cloneResult = cloneWorkDir(repoPath, branch, cloneBaseDir, repo.name, {
+    fastForwardOnly: isArchiveRepo(repo),
+  });
   if (!cloneResult.success) {
     return {
       success: false,

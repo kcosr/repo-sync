@@ -51,8 +51,8 @@ export function addRemote(repoPath: string, name: string, url: string): ExecResu
   return exec(`git remote add ${name} "${url}"`, repoPath);
 }
 
-export function fetchRemote(repoPath: string, remoteName: string): ExecResult {
-  return exec(`git fetch ${remoteName}`, repoPath);
+export function fetchRemote(repoPath: string, remoteName: string, prune = false): ExecResult {
+  return exec(`git fetch ${prune ? "--prune " : ""}${remoteName}`, repoPath);
 }
 
 export function pushMirror(repoPath: string, remoteName: string): ExecResult {
@@ -314,7 +314,12 @@ function getWorkClonePath(options?: SourceNoticeOptions): {
   return { clonePath, deleteClone };
 }
 
-function prepareWorkClone(repoPath: string, branch: string, clonePath: string): ExecResult {
+function prepareWorkClone(
+  repoPath: string,
+  branch: string,
+  clonePath: string,
+  fastForwardOnly = false,
+): ExecResult {
   mkdirSync(dirname(clonePath), { recursive: true });
 
   if (!existsSync(clonePath)) {
@@ -381,6 +386,20 @@ function prepareWorkClone(repoPath: string, branch: string, clonePath: string): 
         error: `Failed to refresh work clone: ${fetchResult.error}`,
       };
     }
+
+    // `checkout -B` below resets the branch; only allow that when it cannot drop local commits.
+    const localBranch = exec(`git rev-parse --verify --quiet refs/heads/${branch}`, clonePath);
+    if (
+      fastForwardOnly &&
+      localBranch.success &&
+      !isAncestor(clonePath, `refs/heads/${branch}`, `origin/${branch}`)
+    ) {
+      return {
+        success: false,
+        output: "",
+        error: `Work clone branch '${branch}' has commits that are not in the cache: ${clonePath}. Move or remove them before running clone.`,
+      };
+    }
   }
 
   const checkoutResult = exec(`git checkout -B ${branch} origin/${branch}`, clonePath);
@@ -404,9 +423,10 @@ export function cloneWorkDir(
   branch: string,
   cloneBaseDir: string,
   repoName: string,
+  options: { fastForwardOnly?: boolean } = {},
 ): CloneWorkResult {
   const clonePath = join(cloneBaseDir, sanitizeCloneName(repoName));
-  const prepareResult = prepareWorkClone(repoPath, branch, clonePath);
+  const prepareResult = prepareWorkClone(repoPath, branch, clonePath, options.fastForwardOnly);
   if (!prepareResult.success) {
     return {
       success: false,

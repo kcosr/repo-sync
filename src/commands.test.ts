@@ -170,6 +170,12 @@ describe("commands", () => {
       expect(refused.code).toBe(1);
       expect(refused.out).toContain("diverged");
       expect(git(destination, ["rev-parse", "main"])).toBe(divergent);
+
+      // Moving the private URL in repo-sync.yaml takes effect on the next status or push.
+      const moved = initBare(join(root, "moved.git"));
+      writeConfig(`  - name: local-id\n    source: archive\n    private: ${moved}\n`);
+      expect((await cli("push", "local-id")).code).toBe(0);
+      expect(git(moved, ["rev-parse", "main"])).toBe(third);
     });
 
     it("keeps the remote workflow unchanged: pull → status → push with prune → clone", async () => {

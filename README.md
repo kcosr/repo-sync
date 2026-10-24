@@ -207,11 +207,15 @@ Import rejects the archive unless:
 3. Transfers only the history of `--commit` into `<cacheDir>/repos/<name>.git` and points `refs/heads/<branch>` at it. Commit IDs are preserved. Other archived branches and tags are not imported.
 4. Removes the staging directory, whether the import succeeded or failed.
 
-Activation happens only after every check passes. A new cache is moved into place in one rename, and an existing cache is updated with a compare-and-swap ref update. A rejected or failed import leaves the previous cache untouched. Import never touches work clones.
+Activation happens only after every check passes. A new cache is moved into place in one rename, and an existing cache is updated with a compare-and-swap ref update. A rejected or failed import leaves the previous cache untouched, and if the provenance record cannot be written, activation is rolled back. Import never changes an existing cache's configuration (`status` and `push` pick up `private` URL changes from `repo-sync.yaml`), and it never touches work clones.
 
 Updates must fast-forward. An archive whose commit is older than, or has diverged from, the cached branch is rejected rather than force-updated. To replace rewritten history, run `clean` and import again. Branches imported earlier stay in the cache even if a later archive no longer contains them. Re-importing the same archive is harmless and reports `Already imported`.
 
-For archive-managed entries, `pull` skips them in broad runs and refuses them by name. `push` never force-pushes or prunes, so refs that exist only on private are kept and listed by `status` as `Kept on private`.
+For archive-managed entries:
+
+- `pull` skips them in broad runs and refuses them by name.
+- `push` never force-pushes or prunes, so refs that exist only on private are kept. `status` lists them as `Kept on private`.
+- `clone` only fast-forwards an existing work clone and refuses to drop its local commits.
 
 ### Provenance
 

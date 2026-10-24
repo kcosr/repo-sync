@@ -12,6 +12,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { type ArchiveEntry, ArchiveError, ZipArchive, sha256File } from "./archive.js";
@@ -454,22 +455,25 @@ export function getLastImport(repoName: string, cacheDir?: string): ImportRecord
  * Imports one commit from a source ZIP into the archive-managed cache for `repo`, associating
  * it with `request.branch`. The archive is validated completely in a private staging directory
  * before the cache changes; activation is a rename (new cache) or a compare-and-swap ref update
- * (existing cache), so a failure leaves the previous cache untouched. No network access occurs.
+ * (existing cache) that is rolled back if provenance cannot be recorded, so a failure leaves the
+ * previous cache untouched. No network access occurs.
  */
 export async function importArchive(
   repo: ArchiveRepoConfig,
   request: ImportRequest,
   options: ImportOptions,
 ): Promise<ImportResult> {
-  const repoPath = getRepoTempPath(repo.name, options.cacheDir);
-  const provenancePath = getImportLogPath(repo.name, options.cacheDir);
+  // Git runs from the staging directory, so every path handed to it must be absolute.
+  const cacheDir = resolve(options.cacheDir);
+  const repoPath = getRepoTempPath(repo.name, cacheDir);
+  const provenancePath = getImportLogPath(repo.name, cacheDir);
   const archivePath = resolve(request.archivePath);
   const requestError = validateImportRequest(request);
   if (requestError) {
     return { success: false, repoPath, provenancePath, error: requestError };
   }
 
-  const stagingRoot = getStagingDir(options.cacheDir);
+  const stagingRoot = getStagingDir(cacheDir);
   mkdirSync(stagingRoot, { recursive: true });
   const staging = mkdtempSync(join(stagingRoot, `${repo.name.replace(/[^a-zA-Z0-9._-]/g, "-")}-`));
   const home = join(staging, "home");
@@ -497,6 +501,7 @@ export async function importArchive(
   };
   const checks = record.validation.checks;
   let archive: ZipArchive | undefined;
+  let logFd: number | undefined;
   let outcome: ImportOutcome;
   let aheadCount: number | undefined;
 
@@ -603,9 +608,14 @@ export async function importArchive(
     git.must("Failed to stage import ref", ["update-ref", IMPORT_REF, request.commit, ""], {
       gitDir: quarantine,
     });
+    // Open the provenance log first so an unwritable log rejects the import before activation.
     mkdirSync(dirname(provenancePath), { recursive: true });
+    logFd = openSync(provenancePath, "a");
 
-    // Activation: everything above only touched the staging directory.
+    // Activation: everything above only touched the staging directory. Existing caches keep
+    // their configuration; status and push sync the private URL from repo-sync.yaml.
+    const branchRef = `refs/heads/${request.branch}`;
+    let rollback = () => {};
     if (!cache.exists) {
       const candidate = join(staging, "cache.git");
       git.must("Failed to create cache repository", [
@@ -626,7 +636,7 @@ export async function importArchive(
           "--no-tags",
           "--no-write-fetch-head",
           quarantine,
-          `${IMPORT_REF}:refs/heads/${request.branch}`,
+          `${IMPORT_REF}:${branchRef}`,
         ],
         { gitDir: candidate },
       );
@@ -635,27 +645,45 @@ export async function importArchive(
         throw new ImportError(`Cache path appeared during import: ${repoPath}`);
       }
       renameSync(candidate, repoPath);
-    } else {
-      configureCache(git, repoPath, repo);
-      if (outcome !== "unchanged") {
-        git.must(
-          "Failed to transfer verified history",
-          ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", quarantine, IMPORT_REF],
-          { gitDir: repoPath },
-        );
-        git.must(
-          "Failed to update cache branch",
-          [
-            "update-ref",
-            "-m",
-            `repo-sync import ${record.archive.sha256}`,
-            `refs/heads/${request.branch}`,
-            request.commit,
-            cache.previous ?? "",
-          ],
-          { gitDir: repoPath },
-        );
-      }
+      rollback = () => renameSync(repoPath, candidate);
+    } else if (outcome !== "unchanged") {
+      git.must(
+        "Failed to transfer verified history",
+        ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", quarantine, IMPORT_REF],
+        { gitDir: repoPath },
+      );
+      git.must(
+        "Failed to update cache branch",
+        [
+          "update-ref",
+          "-m",
+          `repo-sync import ${record.archive.sha256}`,
+          branchRef,
+          request.commit,
+          cache.previous ?? "",
+        ],
+        { gitDir: repoPath },
+      );
+      const previous = cache.previous;
+      rollback = () => {
+        const args = previous
+          ? ["update-ref", branchRef, previous, request.commit]
+          : ["update-ref", "-d", branchRef, request.commit];
+        git.must("Failed to roll back cache branch", args, { gitDir: repoPath });
+      };
+    }
+
+    record.result = outcome;
+    record.validation.passed = true;
+    try {
+      writeFileSync(logFd, `${JSON.stringify(record)}\n`);
+    } catch (err) {
+      record.result = "rejected";
+      record.validation.passed = false;
+      rollback();
+      throw new ImportError(
+        `Failed to record provenance in ${provenancePath}; the import was rolled back: ${(err as Error).message}`,
+      );
     }
   } catch (err) {
     const known = err instanceof ImportError || err instanceof ArchiveError;
@@ -671,22 +699,12 @@ export async function importArchive(
     };
   } finally {
     archive?.close();
+    if (logFd !== undefined) {
+      closeSync(logFd);
+    }
     rmSync(staging, { recursive: true, force: true });
   }
 
-  record.result = outcome;
-  record.validation.passed = true;
-  if (!tryAppendRecord(provenancePath, record)) {
-    return {
-      success: false,
-      outcome,
-      repoPath,
-      provenancePath,
-      record,
-      aheadCount,
-      error: `Cache updated, but the provenance record could not be written to ${provenancePath}`,
-    };
-  }
   return { success: true, outcome, repoPath, provenancePath, record, aheadCount };
 }
 

@@ -8,10 +8,11 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { jest } from "@jest/globals";
 import { DEFAULT_ARCHIVE_LIMITS, getImportLogPath, getRepoTempPath } from "./config.js";
 import { type ImportResult, importArchive, readImportHistory } from "./import.js";
@@ -71,11 +72,17 @@ describe("importArchive", () => {
   const cachePath = () => getRepoTempPath("tool", cacheDir);
   const zipPath = () => join(root, `archive-${zipCount++}.zip`);
 
-  function runImport(zip: string, commit: string, branch = "main", repo = entry()) {
+  function runImport(
+    zip: string,
+    commit: string,
+    branch = "main",
+    repo = entry(),
+    cache = cacheDir,
+  ) {
     return importArchive(
       repo,
       { archivePath: zip, commit, branch },
-      { cacheDir, limits: DEFAULT_ARCHIVE_LIMITS },
+      { cacheDir: cache, limits: DEFAULT_ARCHIVE_LIMITS },
     );
   }
 
@@ -236,6 +243,20 @@ describe("importArchive", () => {
       expect(result.error).toBeUndefined();
       expect(git(cachePath(), ["for-each-ref", "--format=%(refname)"])).toBe("refs/heads/main");
       expect(() => git(cachePath(), ["cat-file", "-e", feature])).toThrow();
+    });
+
+    it("resolves a relative cacheDir before running Git", async () => {
+      const { repo, commits } = standardRepo();
+      const zip = repo.archive(zipPath());
+      const relativeCache = relative(process.cwd(), cacheDir);
+
+      const first = await runImport(zip, commits[2], "main", entry(), relativeCache);
+      const again = await runImport(zip, commits[2], "main", entry(), relativeCache);
+
+      expect(first.error).toBeUndefined();
+      expect(again.outcome).toBe("unchanged");
+      expect(first.repoPath).toBe(cachePath());
+      expect(cacheRef("refs/heads/main")).toBe(commits[2]);
     });
 
     it("imports SHA-256 repositories", async () => {
@@ -647,6 +668,63 @@ describe("importArchive", () => {
   });
 
   describe("failure recovery", () => {
+    it("rejects the import before activation when provenance cannot be recorded", async () => {
+      const { repo, commits } = standardRepo();
+      mkdirSync(getImportLogPath("tool", cacheDir), { recursive: true });
+
+      const result = await runImport(repo.archive(zipPath()), commits[2]);
+
+      expectRejected(result, /provenance could not be written/);
+      expect(existsSync(cachePath())).toBe(false);
+    });
+
+    const withDevFull = existsSync("/dev/full") ? it : it.skip;
+
+    withDevFull("rolls back a new cache when writing provenance fails", async () => {
+      const { repo, commits } = standardRepo();
+      mkdirSync(join(cacheDir, "imports"), { recursive: true });
+      symlinkSync("/dev/full", getImportLogPath("tool", cacheDir));
+
+      const result = await runImport(repo.archive(zipPath()), commits[2]);
+
+      expectRejected(result, /Failed to record provenance .*the import was rolled back/);
+      expect(existsSync(cachePath())).toBe(false);
+    });
+
+    withDevFull("rolls back a branch update when writing provenance fails", async () => {
+      const { repo, commits } = standardRepo();
+      await runImport(repo.archive(zipPath()), commits[2]);
+      const next = repo.commit("next", { "n.txt": "n\n" });
+      const newBranch = repo.archive(zipPath());
+      rmSync(getImportLogPath("tool", cacheDir));
+      symlinkSync("/dev/full", getImportLogPath("tool", cacheDir));
+
+      const updated = await runImport(newBranch, next);
+      const created = await runImport(newBranch, next, "release");
+
+      expectRejected(updated, /the import was rolled back/);
+      expectRejected(created, /the import was rolled back/);
+      expect(cacheRef("refs/heads/main")).toBe(commits[2]);
+      expect(cacheRef("refs/heads/release")).toBeNull();
+    });
+
+    it("never rewrites an existing cache's configuration", async () => {
+      const { repo, commits } = standardRepo();
+      const zip = repo.archive(zipPath());
+      await runImport(zip, commits[2]);
+      const configBefore = readFileSync(join(cachePath(), "config"), "utf-8");
+      const moved = { ...entry(), private: join(root, "moved.git") };
+      const next = repo.commit("next", { "n.txt": "n\n" });
+      const nextZip = repo.archive(zipPath());
+      writeFileSync(join(cachePath(), "refs", "heads", "main.lock"), "");
+
+      expect((await runImport(zip, commits[2], "main", moved)).outcome).toBe("unchanged");
+      expect((await runImport(nextZip, next, "main", moved)).success).toBe(false);
+
+      expect(readFileSync(join(cachePath(), "config"), "utf-8")).toBe(configBefore);
+      expect(cacheRef("refs/heads/main")).toBe(commits[2]);
+    });
+
     it("preserves the previous cache through rejected updates", async () => {
       const { repo, commits } = standardRepo();
       await runImport(repo.archive(zipPath()), commits[2]);
@@ -736,6 +814,30 @@ describe("importArchive", () => {
       const refresh = clone(entry(), { cacheDir });
       expect(refresh.success).toBe(false);
       expect(refresh.error).toMatch(/local changes/);
+    });
+
+    it("fast-forwards work clones but never drops their local commits", async () => {
+      const { repo, commits } = standardRepo();
+      await runImport(repo.archive(zipPath()), commits[2]);
+      const work = clone(entry(), { cacheDir });
+      const next = repo.commit("next", { "n.txt": "n\n" });
+      await runImport(repo.archive(zipPath()), next);
+
+      expect(clone(entry(), { cacheDir }).success).toBe(true);
+      expect(git(work.clonePath, ["rev-parse", "HEAD"])).toBe(next);
+
+      writeFileSync(join(work.clonePath, "local.txt"), "mine\n");
+      git(work.clonePath, ["add", "local.txt"]);
+      git(work.clonePath, ["commit", "--quiet", "-m", "local work"]);
+      const local = git(work.clonePath, ["rev-parse", "HEAD"]);
+      const latest = repo.commit("latest", { "l.txt": "l\n" });
+      await runImport(repo.archive(zipPath()), latest);
+
+      const refresh = clone(entry(), { cacheDir });
+
+      expect(refresh.success).toBe(false);
+      expect(refresh.error).toMatch(/has commits that are not in the cache/);
+      expect(git(work.clonePath, ["rev-parse", "HEAD"])).toBe(local);
     });
 
     it("succeeds without network access to the private remote", async () => {

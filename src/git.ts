@@ -83,10 +83,8 @@ export function getRemoteBranchHead(
 }
 
 export interface PushRefsOptions {
-  refs?: Map<string, string>;
-  privateRefs?: Map<string, string>;
   mirror?: boolean;
-  noticeLease?: { branch: string; expected: string };
+  branchOverride?: { branch: string; commit: string; expected: string };
 }
 
 export function pushRefs(
@@ -94,21 +92,19 @@ export function pushRefs(
   remoteName: string,
   options: PushRefsOptions = {},
 ): ExecResult {
-  const refs = options.refs ?? getLocalRefs(repoPath);
-  const leaseRef = options.noticeLease ? `heads/${options.noticeLease.branch}` : undefined;
   const args = ["push", "--atomic"];
-  if (options.noticeLease) {
-    args.push(`--force-with-lease=refs/${leaseRef}:${options.noticeLease.expected}`);
+  if (options.mirror) args.push("--prune");
+  if (options.branchOverride) {
+    args.push(
+      `--force-with-lease=refs/heads/${options.branchOverride.branch}:${options.branchOverride.expected}`,
+    );
   }
-  args.push(remoteName);
-  for (const [ref, sha] of refs) {
-    const force = options.mirror && ref !== leaseRef ? "+" : "";
-    args.push(`${force}${sha}:refs/${ref}`);
-  }
-  if (options.mirror) {
-    for (const ref of options.privateRefs?.keys() ?? []) {
-      if (!refs.has(ref)) args.push(`:refs/${ref}`);
-    }
+  const force = options.mirror ? "+" : "";
+  args.push(remoteName, `${force}refs/heads/*:refs/heads/*`, `${force}refs/tags/*:refs/tags/*`);
+  if (options.branchOverride) {
+    // Git gives an explicit refspec priority over a matching wildcard. Source
+    // refs stay untouched, and the argument list stays bounded for large mirrors.
+    args.push(`${options.branchOverride.commit}:refs/heads/${options.branchOverride.branch}`);
   }
   return execGit(args, repoPath, false);
 }

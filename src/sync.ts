@@ -1,6 +1,7 @@
 import { rmSync } from "node:fs";
 import { ensureCacheDir, getRepoTempPath, getWorkDir, isArchiveRepo } from "./config.js";
 import {
+  type PushRefsOptions,
   addRemote,
   cloneMirror,
   cloneWorkDir,
@@ -114,12 +115,9 @@ export function pull(repo: RemoteRepoConfig, options?: SyncOptions): PullResult 
 }
 
 interface PushPlan {
-  localRefs: Map<string, string>;
-  privateRefs: Map<string, string>;
   branch: string;
   sourceCommit?: string;
   privateCommit?: string;
-  replaceNotice: boolean;
 }
 
 export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
@@ -301,7 +299,7 @@ function inspectStatus(
     canPush: !hasBehind && !hasDiverged,
     hasChanges,
     errors,
-    plan: { localRefs, privateRefs, branch, sourceCommit, privateCommit, replaceNotice },
+    plan: { branch, sourceCommit, privateCommit },
   };
 }
 
@@ -335,6 +333,7 @@ export function push(repo: RepoConfig, options?: SyncOptions): PushResult {
   const plan = statusResult.plan;
   if (!plan) return { success: false, pushed: false, error: "Could not prepare push" };
   const archive = isArchiveRepo(repo);
+  let branchOverride: PushRefsOptions["branchOverride"];
   if (plan.sourceCommit) {
     try {
       const mode = repo.sourceNotice ?? "none";
@@ -344,7 +343,11 @@ export function push(repo: RepoConfig, options?: SyncOptions): PushResult {
         sourceNoticeMatches(repoPath, plan.privateCommit, plan.sourceCommit, mode, publicUrl)
           ? plan.privateCommit
           : prepareSourceNotice(repoPath, plan.sourceCommit, mode, publicUrl);
-      plan.localRefs.set(`heads/${plan.branch}`, desiredCommit);
+      branchOverride = {
+        branch: plan.branch,
+        commit: desiredCommit,
+        expected: plan.privateCommit ?? "",
+      };
     } catch (error) {
       return {
         success: false,
@@ -356,15 +359,11 @@ export function push(repo: RepoConfig, options?: SyncOptions): PushResult {
 
   console.log(`  Pushing to ${repo.private}...`);
   const pushResult = pushRefs(repoPath, "private", {
-    refs: plan.localRefs,
-    privateRefs: plan.privateRefs,
     mirror: !archive,
-    // Only a verified generated tip may be replaced. The comparison above has
-    // already checked that its source parent is equal to or behind our source.
-    noticeLease:
-      plan.replaceNotice && plan.privateCommit
-        ? { branch: plan.branch, expected: plan.privateCommit }
-        : undefined,
+    // The exact lease also protects a first notice or branch creation from races.
+    // Replacing a generated tip is allowed only after its source parent passes
+    // the ancestry comparison above; other source-history rewrites are refused.
+    branchOverride,
   });
   if (!pushResult.success) {
     return {

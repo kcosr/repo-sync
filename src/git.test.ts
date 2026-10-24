@@ -321,7 +321,7 @@ describe("git", () => {
       expect(git(bareRepo, "for-each-ref", "refs/heads/new-feature")).toBe("");
     });
 
-    it("rejects a stale notice lease atomically when the destination changes", () => {
+    it.each([false, true])("rejects a stale notice lease atomically (mirror=%s)", (mirror) => {
       const expected = git(bareRepo, "rev-parse", "refs/heads/main");
       git(seedRepo, "commit", "--allow-empty", "-m", "concurrent destination work");
       git(seedRepo, "push", "origin", "main");
@@ -330,16 +330,30 @@ describe("git", () => {
       git(seedRepo, "commit", "--allow-empty", "-m", "replacement notice");
       const replacement = git(seedRepo, "rev-parse", "HEAD");
 
+      git(seedRepo, "branch", "new-feature");
       const result = pushRefs(seedRepo, "origin", {
-        refs: new Map([
-          ["heads/main", replacement],
-          ["heads/new-feature", replacement],
-        ]),
-        noticeLease: { branch: "main", expected },
+        mirror,
+        branchOverride: { branch: "main", commit: replacement, expected },
       });
 
       expect(result.success).toBe(false);
       expect(git(bareRepo, "rev-parse", "refs/heads/main")).toBe(concurrent);
+      expect(git(bareRepo, "for-each-ref", "refs/heads/new-feature")).toBe("");
+    });
+
+    it("protects a destination branch created after the first-notice status check", () => {
+      const existing = git(bareRepo, "rev-parse", "refs/heads/main");
+      git(seedRepo, "commit", "--allow-empty", "-m", "first notice");
+      const commit = git(seedRepo, "rev-parse", "HEAD");
+      git(seedRepo, "branch", "new-feature");
+
+      const result = pushRefs(seedRepo, "origin", {
+        mirror: true,
+        branchOverride: { branch: "main", commit, expected: "" },
+      });
+
+      expect(result.success).toBe(false);
+      expect(git(bareRepo, "rev-parse", "refs/heads/main")).toBe(existing);
       expect(git(bareRepo, "for-each-ref", "refs/heads/new-feature")).toBe("");
     });
 

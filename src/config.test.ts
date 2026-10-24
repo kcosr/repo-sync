@@ -1,7 +1,19 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findRepo, getCacheDir, getRepoTempPath, getWorkDir, loadConfig } from "./config.js";
+import {
+  DEFAULT_ARCHIVE_LIMITS,
+  findRepo,
+  getArchiveLimits,
+  getCacheDir,
+  getImportRecordsDir,
+  getRepoTempPath,
+  getStagingDir,
+  getWorkDir,
+  isArchiveRepo,
+  loadConfig,
+} from "./config.js";
+import type { RemoteRepoConfig } from "./types.js";
 
 describe("config", () => {
   const testDir = join(tmpdir(), `repo-sync-test-${Date.now()}`);
@@ -32,9 +44,11 @@ describe("config", () => {
       const config = loadConfig(testConfigPath);
 
       expect(config.repos).toHaveLength(2);
-      expect(config.repos[0].name).toBe("test-repo");
-      expect(config.repos[0].public).toBe("https://github.com/org/test-repo.git");
-      expect(config.repos[0].private).toBe("git@private.com:vendor/test-repo.git");
+      const repo = config.repos[0] as RemoteRepoConfig;
+      expect(repo.name).toBe("test-repo");
+      expect(repo.public).toBe("https://github.com/org/test-repo.git");
+      expect(repo.private).toBe("git@private.com:vendor/test-repo.git");
+      expect(isArchiveRepo(repo)).toBe(false);
     });
 
     it("should throw if config file does not exist", () => {
@@ -99,7 +113,7 @@ repos:
       const config = loadConfig(testConfigPath);
 
       expect(config.cacheDir).toBe("/tmp/repo-sync-cache");
-      expect(config.repos[0].markSourceDeleteClone).toBe(false);
+      expect((config.repos[0] as RemoteRepoConfig).markSourceDeleteClone).toBe(false);
     });
 
     it("should throw if cacheDir is not a string", () => {
@@ -128,6 +142,82 @@ repos:
       expect(() => loadConfig(testConfigPath)).toThrow("invalid 'markSourceDeleteClone'");
     });
 
+    it("should load archive-managed repos without a public URL", () => {
+      writeFileSync(
+        testConfigPath,
+        `repos:
+  - name: local-tool
+    source: archive
+    private: git@private.com:vendor/destination-name.git
+  - name: remote-tool
+    source: remote
+    public: https://github.com/org/tool.git
+    private: git@private.com:vendor/tool.git
+`,
+      );
+
+      const config = loadConfig(testConfigPath);
+
+      expect(isArchiveRepo(config.repos[0])).toBe(true);
+      expect(config.repos[0].private).toBe("git@private.com:vendor/destination-name.git");
+      expect(isArchiveRepo(config.repos[1])).toBe(false);
+    });
+
+    it.each([
+      "public: https://github.com/org/tool.git",
+      "markSource: true",
+      "markSourceDeleteClone: false",
+    ])("should reject archive-managed repos that set %s", (setting) => {
+      writeFileSync(
+        testConfigPath,
+        `repos:
+  - name: tool
+    source: archive
+    private: git@private.com:vendor/tool.git
+    ${setting}
+`,
+      );
+
+      expect(() => loadConfig(testConfigPath)).toThrow("is archive-managed and cannot set");
+    });
+
+    it("should require a private URL for archive-managed repos", () => {
+      writeFileSync(testConfigPath, "repos:\n  - name: tool\n    source: archive\n");
+
+      expect(() => loadConfig(testConfigPath)).toThrow("must have a 'private' URL");
+    });
+
+    it("should reject unknown sources", () => {
+      writeFileSync(
+        testConfigPath,
+        "repos:\n  - name: tool\n    source: tarball\n    private: git@private.com:vendor/tool.git\n",
+      );
+
+      expect(() => loadConfig(testConfigPath)).toThrow("invalid 'source'");
+    });
+
+    it("should load archive limits and fill in defaults", () => {
+      writeFileSync(testConfigPath, "archiveLimits:\n  maxBytes: 1048576\nrepos: []\n");
+
+      const config = loadConfig(testConfigPath);
+
+      expect(getArchiveLimits(config)).toEqual({
+        maxBytes: 1048576,
+        maxEntries: DEFAULT_ARCHIVE_LIMITS.maxEntries,
+      });
+      expect(getArchiveLimits({ repos: [] })).toEqual(DEFAULT_ARCHIVE_LIMITS);
+    });
+
+    it.each([
+      ["archiveLimits: 5", "must be a mapping"],
+      ["archiveLimits:\n  maxBytes: -1", "must be a positive integer"],
+      ["archiveLimits:\n  maxEntries: 1.5", "must be a positive integer"],
+      ["archiveLimits:\n  maxSize: 10", "unknown key 'maxSize'"],
+    ])("should reject invalid archive limits (%s)", (yaml, message) => {
+      writeFileSync(testConfigPath, `${yaml}\nrepos: []\n`);
+
+      expect(() => loadConfig(testConfigPath)).toThrow(message);
+    });
   });
 
   describe("findRepo", () => {
@@ -191,6 +281,15 @@ repos:
       const path = getWorkDir("/tmp/custom-cache");
 
       expect(path).toBe("/tmp/custom-cache/work");
+    });
+  });
+
+  describe("import paths", () => {
+    it("should keep staging and provenance under cacheDir, outside repos and work", () => {
+      expect(getStagingDir("/tmp/custom-cache")).toBe("/tmp/custom-cache/staging");
+      expect(getImportRecordsDir("my-repo", "/tmp/custom-cache")).toBe(
+        "/tmp/custom-cache/imports/my-repo",
+      );
     });
   });
 });

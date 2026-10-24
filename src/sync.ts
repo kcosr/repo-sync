@@ -1,5 +1,5 @@
 import { rmSync } from "node:fs";
-import { ensureCacheDir, getRepoTempPath, getWorkDir } from "./config.js";
+import { ensureCacheDir, getRepoTempPath, getWorkDir, isArchiveRepo } from "./config.js";
 import {
   addRemote,
   addSourceNotice,
@@ -13,11 +13,20 @@ import {
   getParentCommit,
   getRemoteRefs,
   getRepoCloneTime,
+  isImportedCache,
   isSourceNoticeCommit,
   pushMirror,
+  pushRefs,
   repoExists,
 } from "./git.js";
-import type { RefComparison, RepoConfig, RepoStatus } from "./types.js";
+import { getLastImport } from "./import.js";
+import type {
+  ImportRecord,
+  RefComparison,
+  RemoteRepoConfig,
+  RepoConfig,
+  RepoStatus,
+} from "./types.js";
 
 export interface PullResult {
   success: boolean;
@@ -49,10 +58,25 @@ export interface SyncOptions {
   cacheDir?: string;
 }
 
-export function pull(repo: RepoConfig, options?: SyncOptions): PullResult {
+function notReadyError(repo: RepoConfig): string {
+  return isArchiveRepo(repo)
+    ? "Not imported yet. Run 'repo-sync import' first."
+    : "Not pulled yet. Run 'repo-sync pull' first.";
+}
+
+export function pull(repo: RemoteRepoConfig, options?: SyncOptions): PullResult {
   ensureCacheDir(options?.cacheDir);
   const repoPath = getRepoTempPath(repo.name, options?.cacheDir);
   const exists = repoExists(repoPath);
+
+  if (exists && isImportedCache(repoPath)) {
+    return {
+      success: false,
+      repoPath,
+      isNew: false,
+      error: `Cache was created by 'repo-sync import'; run 'repo-sync clean ${repo.name}' before pulling from a public remote`,
+    };
+  }
 
   if (exists) {
     // Fetch latest from origin (public)
@@ -100,11 +124,13 @@ export function pull(repo: RepoConfig, options?: SyncOptions): PullResult {
 
 export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
   const repoPath = getRepoTempPath(repo.name, options?.cacheDir);
+  const archive = isArchiveRepo(repo);
   const errors: string[] = [];
 
   const baseStatus: RepoStatus = {
     name: repo.name,
-    publicUrl: repo.public,
+    source: archive ? "archive" : "remote",
+    publicUrl: archive ? undefined : repo.public,
     privateUrl: repo.private,
     pulled: false,
     branches: [],
@@ -115,20 +141,46 @@ export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
     return {
       status: {
         ...baseStatus,
-        error: "Not pulled yet. Run 'repo-sync pull' first.",
+        error: notReadyError(repo),
       },
       canPush: false,
       hasChanges: false,
-      errors: ["Not pulled yet"],
+      errors: [archive ? "Not imported yet" : "Not pulled yet"],
     };
   }
 
   baseStatus.pulled = true;
-  baseStatus.pulledAt = getRepoCloneTime(repoPath);
+  if (archive) {
+    baseStatus.lastImport = getLastImport(repo.name, options?.cacheDir);
+    // Imports never rewrite cache configuration, so pick up private URL changes here.
+    const remoteResult = addRemote(repoPath, "private", repo.private);
+    if (!remoteResult.success) {
+      const error = `Failed to configure private remote: ${remoteResult.error}`;
+      return {
+        status: { ...baseStatus, error },
+        canPush: false,
+        hasChanges: false,
+        errors: [error],
+      };
+    }
+  } else {
+    baseStatus.pulledAt = getRepoCloneTime(repoPath);
+  }
 
   // Fetch from private to compare
   console.log("  Fetching refs from private remote...");
-  const fetchResult = fetchRemote(repoPath, "private");
+  // Archive entries prune so refs deleted on (or left behind by a previous) private URL vanish.
+  const fetchResult = fetchRemote(repoPath, "private", archive);
+  if (!fetchResult.success && archive) {
+    // Stale tracking refs could make an unreachable destination look up to date.
+    const error = `Could not fetch from private: ${fetchResult.error}`;
+    return {
+      status: { ...baseStatus, error },
+      canPush: false,
+      hasChanges: false,
+      errors: [error],
+    };
+  }
   if (!fetchResult.success) {
     // This might be expected if private repo is empty or doesn't exist yet
     console.log("  Note: Could not fetch from private (may be empty or new)");
@@ -140,7 +192,7 @@ export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
 
   // If markSource is enabled, check if private's default branch HEAD is our notice commit
   // If so, use its parent for comparison instead
-  if (repo.markSource) {
+  if (!archive && repo.markSource) {
     const defaultBranch = getDefaultBranch(repoPath);
     const branchKey = `heads/${defaultBranch}`;
     const privateBranchSha = privateRefs.get(branchKey);
@@ -167,12 +219,17 @@ export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
   // Determine if we can push
   const hasBehind = [...branches, ...tags].some((r) => r.status === "behind");
   const hasDiverged = [...branches, ...tags].some((r) => r.status === "diverged");
+  // Archive imports never delete: refs only on private are kept, so they are not changes.
   const hasChanges = [...branches, ...tags].some(
-    (r) => r.status === "ahead" || r.status === "new" || r.status === "missing",
+    (r) => r.status === "ahead" || r.status === "new" || (!archive && r.status === "missing"),
   );
 
   if (hasBehind) {
-    errors.push("Private has commits not in public - this shouldn't happen");
+    errors.push(
+      archive
+        ? "Private has commits not in the imported history"
+        : "Private has commits not in public - this shouldn't happen",
+    );
   }
   if (hasDiverged) {
     errors.push("Refs have diverged - manual intervention may be needed");
@@ -193,7 +250,7 @@ export function push(repo: RepoConfig, options?: SyncOptions): PushResult {
     return {
       success: false,
       pushed: false,
-      error: "Not pulled yet. Run 'repo-sync pull' first.",
+      error: notReadyError(repo),
     };
   }
 
@@ -215,7 +272,7 @@ export function push(repo: RepoConfig, options?: SyncOptions): PushResult {
   }
 
   // Add source notice if configured
-  if (repo.markSource) {
+  if (!isArchiveRepo(repo) && repo.markSource) {
     console.log("  Adding source notice to README...");
     const branch = getDefaultBranch(repoPath);
     const noticeResult = addSourceNotice(repoPath, repo.public, branch, {
@@ -234,7 +291,9 @@ export function push(repo: RepoConfig, options?: SyncOptions): PushResult {
 
   // Push
   console.log(`  Pushing to ${repo.private}...`);
-  const pushResult = pushMirror(repoPath, "private");
+  const pushResult = isArchiveRepo(repo)
+    ? pushRefs(repoPath, "private")
+    : pushMirror(repoPath, "private");
   if (!pushResult.success) {
     return {
       success: false,
@@ -265,12 +324,14 @@ export function clone(repo: RepoConfig, options?: SyncOptions): CloneResult {
     return {
       success: false,
       clonePath,
-      error: "Not pulled yet. Run 'repo-sync pull' first.",
+      error: notReadyError(repo),
     };
   }
 
   const branch = getDefaultBranch(repoPath);
-  const cloneResult = cloneWorkDir(repoPath, branch, cloneBaseDir, repo.name);
+  const cloneResult = cloneWorkDir(repoPath, branch, cloneBaseDir, repo.name, {
+    fastForwardOnly: isArchiveRepo(repo),
+  });
   if (!cloneResult.success) {
     return {
       success: false,
@@ -307,27 +368,44 @@ export function formatRefComparison(ref: RefComparison): string {
   }
 }
 
+function formatImport(record: ImportRecord): string {
+  const when = new Date(record.importedAt).toLocaleString();
+  return `${when} (${record.branch} at ${record.commit.substring(0, 12)}, archive sha256 ${record.archive.sha256?.substring(0, 12)})`;
+}
+
 export function formatStatus(result: StatusResult): string {
   const lines: string[] = [];
   const { status: s } = result;
+  const archive = s.source === "archive";
 
   lines.push(`\n${s.name}`);
-  lines.push(`  Public:  ${s.publicUrl}`);
+  if (archive) {
+    lines.push("  Source:  archive import");
+  } else {
+    lines.push(`  Public:  ${s.publicUrl}`);
+  }
   lines.push(`  Private: ${s.privateUrl}`);
 
   if (!s.pulled) {
-    lines.push("  Status:  Not pulled yet");
+    lines.push(archive ? "  Status:  Not imported yet" : "  Status:  Not pulled yet");
     return lines.join("\n");
   }
 
+  if (s.lastImport) {
+    lines.push(`  Imported: ${formatImport(s.lastImport)}`);
+  }
   if (s.pulledAt) {
     lines.push(`  Pulled:  ${s.pulledAt.toLocaleString()}`);
   }
 
-  const changedBranches = s.branches.filter((b) => b.status !== "same");
-  const changedTags = s.tags.filter((t) => t.status !== "same");
+  const isChange = (r: RefComparison) =>
+    r.status !== "same" && !(archive && r.status === "missing");
+  const changedBranches = s.branches.filter(isChange);
+  const changedTags = s.tags.filter(isChange);
 
-  if (changedBranches.length === 0 && changedTags.length === 0) {
+  if (s.error) {
+    lines.push("  Status:  Unknown (see errors)");
+  } else if (changedBranches.length === 0 && changedTags.length === 0) {
     lines.push("  Status:  Up to date ✓");
   } else {
     if (changedBranches.length > 0) {
@@ -340,6 +418,19 @@ export function formatStatus(result: StatusResult): string {
       lines.push("  Tags:");
       for (const t of changedTags) {
         lines.push(formatRefComparison(t));
+      }
+    }
+  }
+
+  if (archive) {
+    const kept = [
+      ...s.branches.filter((b) => b.status === "missing").map((b) => `branch ${b.name}`),
+      ...s.tags.filter((t) => t.status === "missing").map((t) => `tag ${t.name}`),
+    ];
+    if (kept.length > 0) {
+      lines.push("  Kept on private (not managed by imports):");
+      for (const ref of kept) {
+        lines.push(`    ${ref}`);
       }
     }
   }

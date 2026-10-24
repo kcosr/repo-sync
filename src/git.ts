@@ -51,8 +51,8 @@ export function addRemote(repoPath: string, name: string, url: string): ExecResu
   return exec(`git remote add ${name} "${url}"`, repoPath);
 }
 
-export function fetchRemote(repoPath: string, remoteName: string): ExecResult {
-  return exec(`git fetch ${remoteName}`, repoPath);
+export function fetchRemote(repoPath: string, remoteName: string, prune = false): ExecResult {
+  return exec(`git fetch ${prune ? "--prune " : ""}${remoteName}`, repoPath);
 }
 
 export function pushMirror(repoPath: string, remoteName: string): ExecResult {
@@ -61,6 +61,19 @@ export function pushMirror(repoPath: string, remoteName: string): ExecResult {
     repoPath,
     false,
   );
+}
+
+export function pushRefs(repoPath: string, remoteName: string): ExecResult {
+  // Archive-managed refs only move forward and are never deleted on the remote.
+  return exec(
+    `git push ${remoteName} "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*"`,
+    repoPath,
+    false,
+  );
+}
+
+export function isImportedCache(repoPath: string): boolean {
+  return exec("git config --get repo-sync.source", repoPath).output === "archive";
 }
 
 export function getLocalRefs(repoPath: string): Map<string, string> {
@@ -108,7 +121,8 @@ export function getRemoteRefs(repoPath: string, remoteName: string): Map<string,
   if (result.success && result.output) {
     for (const line of result.output.split("\n")) {
       const match = line.match(/^refs\/remotes\/[^/]+\/(.+) ([a-f0-9]+)$/);
-      if (match) {
+      // Git 2.48+ records the remote's default branch as the symbolic ref <remote>/HEAD.
+      if (match && match[1] !== "HEAD") {
         const [, name, sha] = match;
         refs.set(`heads/${name}`, sha);
       }
@@ -300,7 +314,35 @@ function getWorkClonePath(options?: SourceNoticeOptions): {
   return { clonePath, deleteClone };
 }
 
-function prepareWorkClone(repoPath: string, branch: string, clonePath: string): ExecResult {
+/**
+ * `checkout -B` resets `branch` and moves HEAD to `origin/<branch>`. Report whether that would
+ * drop commits: local commits on the branch, or a detached HEAD that no other branch contains.
+ */
+function findUnpreservedCommits(clonePath: string, branch: string): string | undefined {
+  const target = `origin/${branch}`;
+  const localBranch = exec(`git rev-parse --verify --quiet refs/heads/${branch}`, clonePath);
+  if (localBranch.success && !isAncestor(clonePath, `refs/heads/${branch}`, target)) {
+    return `Work clone branch '${branch}' has commits that are not in the cache: ${clonePath}. Move or remove them before running clone.`;
+  }
+  const head = exec("git rev-parse --verify --quiet HEAD", clonePath);
+  if (head.success && !isAncestor(clonePath, "HEAD", target)) {
+    const branches = exec(
+      "git for-each-ref --contains HEAD --format='%(refname)' refs/heads/",
+      clonePath,
+    );
+    if (!branches.success || branches.output.length === 0) {
+      return `Work clone HEAD has commits that are not on any branch or in the cache: ${clonePath}. Create a branch for them before running clone.`;
+    }
+  }
+  return undefined;
+}
+
+function prepareWorkClone(
+  repoPath: string,
+  branch: string,
+  clonePath: string,
+  fastForwardOnly = false,
+): ExecResult {
   mkdirSync(dirname(clonePath), { recursive: true });
 
   if (!existsSync(clonePath)) {
@@ -367,6 +409,13 @@ function prepareWorkClone(repoPath: string, branch: string, clonePath: string): 
         error: `Failed to refresh work clone: ${fetchResult.error}`,
       };
     }
+
+    if (fastForwardOnly) {
+      const lossError = findUnpreservedCommits(clonePath, branch);
+      if (lossError) {
+        return { success: false, output: "", error: lossError };
+      }
+    }
   }
 
   const checkoutResult = exec(`git checkout -B ${branch} origin/${branch}`, clonePath);
@@ -390,9 +439,10 @@ export function cloneWorkDir(
   branch: string,
   cloneBaseDir: string,
   repoName: string,
+  options: { fastForwardOnly?: boolean } = {},
 ): CloneWorkResult {
   const clonePath = join(cloneBaseDir, sanitizeCloneName(repoName));
-  const prepareResult = prepareWorkClone(repoPath, branch, clonePath);
+  const prepareResult = prepareWorkClone(repoPath, branch, clonePath, options.fastForwardOnly);
   if (!prepareResult.success) {
     return {
       success: false,

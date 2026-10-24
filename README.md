@@ -207,7 +207,7 @@ Import rejects the archive unless:
 3. Transfers only the history of `--commit` into `<cacheDir>/repos/<name>.git` and points `refs/heads/<branch>` at it. Commit IDs are preserved. Other archived branches and tags are not imported.
 4. Removes the staging directory, whether the import succeeded or failed.
 
-Activation happens only after every check passes. A new cache is moved into place in one rename, and an existing cache is updated with a compare-and-swap ref update. A rejected or failed import leaves the previous cache untouched, and if the provenance record cannot be written, activation is rolled back. Import never changes an existing cache's configuration (`status` and `push` pick up `private` URL changes from `repo-sync.yaml`), and it never touches work clones.
+Activation happens only after every check passes. A new cache is moved into place in one rename, and an existing cache is updated with a compare-and-swap ref update. A rejected or failed import leaves the previous cache untouched. If the provenance record cannot be published, activation is rolled back. Import never changes an existing cache's configuration (`status` and `push` pick up `private` URL changes from `repo-sync.yaml`), and it never touches work clones.
 
 Updates must fast-forward. An archive whose commit is older than, or has diverged from, the cached branch is rejected rather than force-updated. To replace rewritten history, run `clean` and import again. Branches imported earlier stay in the cache even if a later archive no longer contains them. Re-importing the same archive is harmless and reports `Already imported`.
 
@@ -220,7 +220,7 @@ For archive-managed entries:
 
 ### Provenance
 
-Every import attempt appends one JSON line to `<cacheDir>/imports/<name>.jsonl`, outside the imported source tree. Each line records:
+Every import attempt writes one JSON file to `<cacheDir>/imports/<name>/`, outside the imported source tree. Records are written completely and then renamed into place, so a partial record is never visible. Each record contains:
 
 - the archive path, SHA-256, size and top-level directory
 - the archive HEAD (a ref name, or `detached`)

@@ -6,7 +6,7 @@ import {
   findRepo,
   getArchiveLimits,
   getCacheDir,
-  getImportLogPath,
+  getImportRecordsDir,
   getRepoTempPath,
   getStagingDir,
   getWorkDir,
@@ -287,8 +287,8 @@ repos:
   describe("import paths", () => {
     it("should keep staging and provenance under cacheDir, outside repos and work", () => {
       expect(getStagingDir("/tmp/custom-cache")).toBe("/tmp/custom-cache/staging");
-      expect(getImportLogPath("my-repo", "/tmp/custom-cache")).toBe(
-        "/tmp/custom-cache/imports/my-repo.jsonl",
+      expect(getImportRecordsDir("my-repo", "/tmp/custom-cache")).toBe(
+        "/tmp/custom-cache/imports/my-repo",
       );
     });
   });

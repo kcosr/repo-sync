@@ -1,15 +1,13 @@
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   closeSync,
   existsSync,
-  fstatSync,
-  ftruncateSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
-  readSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -18,7 +16,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { type ArchiveEntry, ArchiveError, ZipArchive, sha256File } from "./archive.js";
-import { getImportLogPath, getRepoTempPath, getStagingDir } from "./config.js";
+import { getImportRecordsDir, getRepoTempPath, getStagingDir } from "./config.js";
 import type { ArchiveLimits, ArchiveRepoConfig, ImportOutcome, ImportRecord } from "./types.js";
 
 /** Untracked archive metadata that may sit beside `.git` without making the tree dirty. */
@@ -47,6 +45,7 @@ export interface ImportResult {
   success: boolean;
   outcome?: ImportOutcome;
   repoPath: string;
+  /** The provenance record written for this attempt, or the records directory if none was. */
   provenancePath: string;
   record?: ImportRecord;
   aheadCount?: number;
@@ -428,23 +427,30 @@ function configureCache(git: TrustedGit, gitDir: string, repo: ArchiveRepoConfig
   }
 }
 
+/** Reads every recorded import attempt, oldest first. */
 export function readImportHistory(repoName: string, cacheDir?: string): ImportRecord[] {
-  const path = getImportLogPath(repoName, cacheDir);
-  if (!existsSync(path)) {
+  const dir = getImportRecordsDir(repoName, cacheDir);
+  if (!existsSync(dir)) {
     return [];
   }
-  const records: ImportRecord[] = [];
-  for (const line of readFileSync(path, "utf-8").split("\n")) {
-    if (line.trim().length === 0) {
+  const records: Array<{ name: string; record: ImportRecord }> = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".json")) {
       continue;
     }
     try {
-      records.push(JSON.parse(line) as ImportRecord);
+      records.push({ name, record: JSON.parse(readFileSync(join(dir, name), "utf-8")) });
     } catch {
-      // Skip a torn final line rather than hiding every earlier record.
+      // A record that cannot be read does not hide the others.
     }
   }
-  return records;
+  return records
+    .sort((a, b) =>
+      a.record.importedAt === b.record.importedAt
+        ? a.name.localeCompare(b.name)
+        : a.record.importedAt.localeCompare(b.record.importedAt),
+    )
+    .map((entry) => entry.record);
 }
 
 export function getLastImport(repoName: string, cacheDir?: string): ImportRecord | undefined {
@@ -468,11 +474,11 @@ export async function importArchive(
   // Git runs from the staging directory, so every path handed to it must be absolute.
   const cacheDir = resolve(options.cacheDir);
   const repoPath = getRepoTempPath(repo.name, cacheDir);
-  const provenancePath = getImportLogPath(repo.name, cacheDir);
+  const recordsDir = getImportRecordsDir(repo.name, cacheDir);
   const archivePath = resolve(request.archivePath);
   const requestError = validateImportRequest(request);
   if (requestError) {
-    return { success: false, repoPath, provenancePath, error: requestError };
+    return { success: false, repoPath, provenancePath: recordsDir, error: requestError };
   }
 
   const stagingRoot = getStagingDir(cacheDir);
@@ -486,7 +492,7 @@ export async function importArchive(
     return {
       success: false,
       repoPath,
-      provenancePath,
+      provenancePath: recordsDir,
       error: `--branch '${request.branch}' is not a valid branch name`,
     };
   }
@@ -503,7 +509,6 @@ export async function importArchive(
   };
   const checks = record.validation.checks;
   let archive: ZipArchive | undefined;
-  let logFd: number | undefined;
   let outcome: ImportOutcome;
   let aheadCount: number | undefined;
 
@@ -610,9 +615,12 @@ export async function importArchive(
     git.must("Failed to stage import ref", ["update-ref", IMPORT_REF, request.commit, ""], {
       gitDir: quarantine,
     });
-    // Open the provenance log first so an unwritable log rejects the import before activation.
-    mkdirSync(dirname(provenancePath), { recursive: true });
-    logFd = openSync(provenancePath, "a+");
+    // Write the complete provenance record before activating; it is published with one rename.
+    record.result = outcome;
+    record.validation.passed = true;
+    mkdirSync(recordsDir, { recursive: true });
+    const pendingRecord = join(staging, "record.json");
+    writeFileSync(pendingRecord, `${JSON.stringify(record, null, 2)}\n`, { flag: "wx" });
 
     // Activation: everything above only touched the staging directory. Existing caches keep
     // their configuration; status and push sync the private URL from repo-sync.yaml.
@@ -675,77 +683,50 @@ export async function importArchive(
       };
     }
 
-    record.result = outcome;
-    record.validation.passed = true;
+    const recordPath = join(recordsDir, recordFileName(record));
     try {
-      appendRecord(logFd, record);
+      renameSync(pendingRecord, recordPath);
     } catch (err) {
-      record.result = "rejected";
-      record.validation.passed = false;
       rollback();
       throw new ImportError(
-        `Failed to record provenance in ${provenancePath}; the import was rolled back: ${(err as Error).message}`,
+        `Failed to record provenance in ${recordsDir}; the import was rolled back: ${(err as Error).message}`,
       );
     }
+    return { success: true, outcome, repoPath, provenancePath: recordPath, record, aheadCount };
   } catch (err) {
     const known = err instanceof ImportError || err instanceof ArchiveError;
     const message = known ? err.message : `Unexpected error: ${(err as Error).message}`;
+    record.result = "rejected";
+    record.validation.passed = false;
     record.validation.error = message;
-    const logged = tryAppendRecord(provenancePath, record);
+    const recordPath = tryWriteRecord(staging, recordsDir, record);
     return {
       success: false,
       repoPath,
-      provenancePath,
+      provenancePath: recordPath ?? recordsDir,
       record,
-      error: logged ? message : `${message} (provenance could not be written to ${provenancePath})`,
+      error: recordPath ? message : `${message} (provenance could not be written to ${recordsDir})`,
     };
   } finally {
     archive?.close();
-    if (logFd !== undefined) {
-      closeSync(logFd);
-    }
     rmSync(staging, { recursive: true, force: true });
   }
-
-  return { success: true, outcome, repoPath, provenancePath, record, aheadCount };
 }
 
-/**
- * Appends one JSON line. A failed write is truncated away, and a log that ends mid-record (from
- * an earlier crash) gets a newline first, so every complete record stays on its own line.
- */
-function appendRecord(fd: number, record: ImportRecord): void {
-  const { size } = fstatSync(fd);
-  let separator = "";
-  if (size > 0) {
-    const last = Buffer.alloc(1);
-    readSync(fd, last, 0, 1, size - 1);
-    separator = last[0] === 0x0a ? "" : "\n";
-  }
-  try {
-    writeFileSync(fd, `${separator}${JSON.stringify(record)}\n`);
-  } catch (err) {
-    try {
-      ftruncateSync(fd, size);
-    } catch {
-      // Not truncatable (e.g. a device); the separator logic recovers on the next append.
-    }
-    throw err;
-  }
+function recordFileName(record: ImportRecord): string {
+  return `${record.importedAt.replace(/[:.]/g, "-")}-${randomBytes(4).toString("hex")}.json`;
 }
 
-function tryAppendRecord(path: string, record: ImportRecord): boolean {
-  let fd: number | undefined;
+/** Writes a record in staging, then renames it into place so readers never see a partial file. */
+function tryWriteRecord(staging: string, recordsDir: string, record: ImportRecord): string | null {
   try {
-    mkdirSync(dirname(path), { recursive: true });
-    fd = openSync(path, "a+");
-    appendRecord(fd, record);
-    return true;
+    const pending = join(staging, "rejected-record.json");
+    writeFileSync(pending, `${JSON.stringify(record, null, 2)}\n`, { flag: "wx" });
+    mkdirSync(recordsDir, { recursive: true });
+    const recordPath = join(recordsDir, recordFileName(record));
+    renameSync(pending, recordPath);
+    return recordPath;
   } catch {
-    return false;
-  } finally {
-    if (fd !== undefined) {
-      closeSync(fd);
-    }
+    return null;
   }
 }

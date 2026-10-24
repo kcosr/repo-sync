@@ -8,13 +8,12 @@ import {
   readdirSync,
   rmSync,
   statSync,
-  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join, relative } from "node:path";
 import { jest } from "@jest/globals";
-import { DEFAULT_ARCHIVE_LIMITS, getImportLogPath, getRepoTempPath } from "./config.js";
+import { DEFAULT_ARCHIVE_LIMITS, getImportRecordsDir, getRepoTempPath } from "./config.js";
 import { type ImportResult, importArchive, readImportHistory } from "./import.js";
 import { clone } from "./sync.js";
 import { SourceRepo, git, initBare, makeTempDir } from "./testing/fixtures.js";
@@ -154,7 +153,10 @@ describe("importArchive", () => {
       const result = await runImport(zip, commits[2]);
       const history = readImportHistory("tool", cacheDir);
 
-      expect(result.provenancePath).toBe(getImportLogPath("tool", cacheDir));
+      expect(result.provenancePath).toMatch(
+        new RegExp(`^${getImportRecordsDir("tool", cacheDir)}/[^/]+\\.json$`),
+      );
+      expect(JSON.parse(readFileSync(result.provenancePath, "utf-8"))).toEqual(history[0]);
       expect(history).toHaveLength(1);
       expect(history[0]).toMatchObject({
         repo: "tool",
@@ -213,7 +215,9 @@ describe("importArchive", () => {
 
       expect(result.error).toBeUndefined();
       expect(result.repoPath).toBe(join(cacheDir, "repos", "local-id.git"));
-      expect(result.provenancePath).toBe(join(cacheDir, "imports", "local-id.jsonl"));
+      expect(result.provenancePath.startsWith(join(cacheDir, "imports", "local-id", ""))).toBe(
+        true,
+      );
       expect(result.record?.archive.root).toBe("upstream-src");
       expect(git(result.repoPath, ["config", "--get", "remote.private.url"])).toBe(destination);
       expect(readdirSync(join(cacheDir, "repos"))).toEqual(["local-id.git"]);
@@ -478,7 +482,7 @@ describe("importArchive", () => {
       expect(short.error).toMatch(/full 40- or 64-character/);
       expect(badBranch.error).toMatch(/not a valid branch name/);
       expect(optionLike.error).toMatch(/not a valid branch name/);
-      expect(existsSync(getImportLogPath("tool", cacheDir))).toBe(false);
+      expect(existsSync(getImportRecordsDir("tool", cacheDir))).toBe(false);
       expect(stagingEntries()).toEqual([]);
     });
 
@@ -670,7 +674,8 @@ describe("importArchive", () => {
   describe("failure recovery", () => {
     it("rejects the import before activation when provenance cannot be recorded", async () => {
       const { repo, commits } = standardRepo();
-      mkdirSync(getImportLogPath("tool", cacheDir), { recursive: true });
+      mkdirSync(join(cacheDir, "imports"), { recursive: true });
+      writeFileSync(getImportRecordsDir("tool", cacheDir), "not a directory");
 
       const result = await runImport(repo.archive(zipPath()), commits[2]);
 
@@ -678,45 +683,53 @@ describe("importArchive", () => {
       expect(existsSync(cachePath())).toBe(false);
     });
 
-    const withDevFull = existsSync("/dev/full") ? it : it.skip;
+    // Write permission does not restrict root, so these need an unprivileged user.
+    const unprivileged = process.getuid?.() === 0 ? it.skip : it;
 
-    withDevFull("rolls back a new cache when writing provenance fails", async () => {
+    unprivileged("rolls back a new cache when its record cannot be published", async () => {
       const { repo, commits } = standardRepo();
-      mkdirSync(join(cacheDir, "imports"), { recursive: true });
-      symlinkSync("/dev/full", getImportLogPath("tool", cacheDir));
+      const records = getImportRecordsDir("tool", cacheDir);
+      mkdirSync(records, { recursive: true });
+      chmodSync(records, 0o555);
 
       const result = await runImport(repo.archive(zipPath()), commits[2]);
 
+      chmodSync(records, 0o755);
       expectRejected(result, /Failed to record provenance .*the import was rolled back/);
       expect(existsSync(cachePath())).toBe(false);
+      expect(readImportHistory("tool", cacheDir)).toEqual([]);
     });
 
-    withDevFull("rolls back a branch update when writing provenance fails", async () => {
+    unprivileged("rolls back branch updates when their record cannot be published", async () => {
       const { repo, commits } = standardRepo();
       await runImport(repo.archive(zipPath()), commits[2]);
       const next = repo.commit("next", { "n.txt": "n\n" });
-      const newBranch = repo.archive(zipPath());
-      rmSync(getImportLogPath("tool", cacheDir));
-      symlinkSync("/dev/full", getImportLogPath("tool", cacheDir));
+      const zip = repo.archive(zipPath());
+      const records = getImportRecordsDir("tool", cacheDir);
+      chmodSync(records, 0o555);
 
-      const updated = await runImport(newBranch, next);
-      const created = await runImport(newBranch, next, "release");
+      const updated = await runImport(zip, next);
+      const created = await runImport(zip, next, "release");
 
+      chmodSync(records, 0o755);
       expectRejected(updated, /the import was rolled back/);
       expectRejected(created, /the import was rolled back/);
       expect(cacheRef("refs/heads/main")).toBe(commits[2]);
       expect(cacheRef("refs/heads/release")).toBeNull();
+      expect(readImportHistory("tool", cacheDir).map((r) => r.result)).toEqual(["created"]);
     });
 
-    it("keeps later records readable after a torn provenance write", async () => {
+    it("keeps one record per attempt, unaffected by unreadable records", async () => {
       const { repo, commits } = standardRepo();
-      mkdirSync(join(cacheDir, "imports"), { recursive: true });
-      writeFileSync(getImportLogPath("tool", cacheDir), '{"repo":"tool","result":"crea');
+      const records = getImportRecordsDir("tool", cacheDir);
+      mkdirSync(records, { recursive: true });
+      writeFileSync(join(records, "0000-torn.json"), '{"repo":"tool","result":"crea');
 
       const result = await runImport(repo.archive(zipPath()), commits[2]);
       await runImport(join(root, "missing.zip"), commits[2]);
 
       expect(result.outcome).toBe("created");
+      expect(readdirSync(records)).toHaveLength(3);
       expect(readImportHistory("tool", cacheDir).map((r) => r.result)).toEqual([
         "created",
         "rejected",

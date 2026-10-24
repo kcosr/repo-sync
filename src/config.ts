@@ -45,8 +45,8 @@ export function getStagingDir(cacheDir?: string): string {
   return join(resolveCacheDir(cacheDir), "staging");
 }
 
-export function getImportLogPath(repoName: string, cacheDir?: string): string {
-  return join(resolveCacheDir(cacheDir), "imports", `${repoName}.jsonl`);
+export function getImportRecordsDir(repoName: string, cacheDir?: string): string {
+  return join(resolveCacheDir(cacheDir), "imports", repoName);
 }
 
 export function getRepoTempPath(repoName: string, cacheDir?: string): string {

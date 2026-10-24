@@ -176,6 +176,15 @@ describe("commands", () => {
       writeConfig(`  - name: local-id\n    source: archive\n    private: ${moved}\n`);
       expect((await cli("push", "local-id")).code).toBe(0);
       expect(git(moved, ["rev-parse", "main"])).toBe(third);
+
+      // An unreachable destination is an error, never "up to date" from stale tracking refs.
+      writeConfig(
+        `  - name: local-id\n    source: archive\n    private: ${join(root, "missing.git")}\n`,
+      );
+      const unreachable = await cli("push", "local-id");
+      expect(unreachable.code).toBe(1);
+      expect(unreachable.out).toContain("Could not fetch from private");
+      expect((await cli("status", "local-id")).out).toContain("Status:  Unknown (see errors)");
     });
 
     it("keeps the remote workflow unchanged: pull → status → push with prune → clone", async () => {

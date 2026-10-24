@@ -314,6 +314,29 @@ function getWorkClonePath(options?: SourceNoticeOptions): {
   return { clonePath, deleteClone };
 }
 
+/**
+ * `checkout -B` resets `branch` and moves HEAD to `origin/<branch>`. Report whether that would
+ * drop commits: local commits on the branch, or a detached HEAD that no other branch contains.
+ */
+function findUnpreservedCommits(clonePath: string, branch: string): string | undefined {
+  const target = `origin/${branch}`;
+  const localBranch = exec(`git rev-parse --verify --quiet refs/heads/${branch}`, clonePath);
+  if (localBranch.success && !isAncestor(clonePath, `refs/heads/${branch}`, target)) {
+    return `Work clone branch '${branch}' has commits that are not in the cache: ${clonePath}. Move or remove them before running clone.`;
+  }
+  const head = exec("git rev-parse --verify --quiet HEAD", clonePath);
+  if (head.success && !isAncestor(clonePath, "HEAD", target)) {
+    const branches = exec(
+      "git for-each-ref --contains HEAD --format='%(refname)' refs/heads/",
+      clonePath,
+    );
+    if (!branches.success || branches.output.length === 0) {
+      return `Work clone HEAD has commits that are not on any branch or in the cache: ${clonePath}. Create a branch for them before running clone.`;
+    }
+  }
+  return undefined;
+}
+
 function prepareWorkClone(
   repoPath: string,
   branch: string,
@@ -387,18 +410,11 @@ function prepareWorkClone(
       };
     }
 
-    // `checkout -B` below resets the branch; only allow that when it cannot drop local commits.
-    const localBranch = exec(`git rev-parse --verify --quiet refs/heads/${branch}`, clonePath);
-    if (
-      fastForwardOnly &&
-      localBranch.success &&
-      !isAncestor(clonePath, `refs/heads/${branch}`, `origin/${branch}`)
-    ) {
-      return {
-        success: false,
-        output: "",
-        error: `Work clone branch '${branch}' has commits that are not in the cache: ${clonePath}. Move or remove them before running clone.`,
-      };
+    if (fastForwardOnly) {
+      const lossError = findUnpreservedCommits(clonePath, branch);
+      if (lossError) {
+        return { success: false, output: "", error: lossError };
+      }
     }
   }
 

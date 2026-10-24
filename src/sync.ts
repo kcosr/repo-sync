@@ -171,6 +171,16 @@ export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
   console.log("  Fetching refs from private remote...");
   // Archive entries prune so refs deleted on (or left behind by a previous) private URL vanish.
   const fetchResult = fetchRemote(repoPath, "private", archive);
+  if (!fetchResult.success && archive) {
+    // Stale tracking refs could make an unreachable destination look up to date.
+    const error = `Could not fetch from private: ${fetchResult.error}`;
+    return {
+      status: { ...baseStatus, error },
+      canPush: false,
+      hasChanges: false,
+      errors: [error],
+    };
+  }
   if (!fetchResult.success) {
     // This might be expected if private repo is empty or doesn't exist yet
     console.log("  Note: Could not fetch from private (may be empty or new)");
@@ -393,7 +403,9 @@ export function formatStatus(result: StatusResult): string {
   const changedBranches = s.branches.filter(isChange);
   const changedTags = s.tags.filter(isChange);
 
-  if (changedBranches.length === 0 && changedTags.length === 0) {
+  if (s.error) {
+    lines.push("  Status:  Unknown (see errors)");
+  } else if (changedBranches.length === 0 && changedTags.length === 0) {
     lines.push("  Status:  Up to date ✓");
   } else {
     if (changedBranches.length > 0) {

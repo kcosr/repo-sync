@@ -1,13 +1,15 @@
 import { spawnSync } from "node:child_process";
 import {
-  appendFileSync,
   closeSync,
   existsSync,
+  fstatSync,
+  ftruncateSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -610,7 +612,7 @@ export async function importArchive(
     });
     // Open the provenance log first so an unwritable log rejects the import before activation.
     mkdirSync(dirname(provenancePath), { recursive: true });
-    logFd = openSync(provenancePath, "a");
+    logFd = openSync(provenancePath, "a+");
 
     // Activation: everything above only touched the staging directory. Existing caches keep
     // their configuration; status and push sync the private URL from repo-sync.yaml.
@@ -676,7 +678,7 @@ export async function importArchive(
     record.result = outcome;
     record.validation.passed = true;
     try {
-      writeFileSync(logFd, `${JSON.stringify(record)}\n`);
+      appendRecord(logFd, record);
     } catch (err) {
       record.result = "rejected";
       record.validation.passed = false;
@@ -708,12 +710,42 @@ export async function importArchive(
   return { success: true, outcome, repoPath, provenancePath, record, aheadCount };
 }
 
+/**
+ * Appends one JSON line. A failed write is truncated away, and a log that ends mid-record (from
+ * an earlier crash) gets a newline first, so every complete record stays on its own line.
+ */
+function appendRecord(fd: number, record: ImportRecord): void {
+  const { size } = fstatSync(fd);
+  let separator = "";
+  if (size > 0) {
+    const last = Buffer.alloc(1);
+    readSync(fd, last, 0, 1, size - 1);
+    separator = last[0] === 0x0a ? "" : "\n";
+  }
+  try {
+    writeFileSync(fd, `${separator}${JSON.stringify(record)}\n`);
+  } catch (err) {
+    try {
+      ftruncateSync(fd, size);
+    } catch {
+      // Not truncatable (e.g. a device); the separator logic recovers on the next append.
+    }
+    throw err;
+  }
+}
+
 function tryAppendRecord(path: string, record: ImportRecord): boolean {
+  let fd: number | undefined;
   try {
     mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(path, `${JSON.stringify(record)}\n`);
+    fd = openSync(path, "a+");
+    appendRecord(fd, record);
     return true;
   } catch {
     return false;
+  } finally {
+    if (fd !== undefined) {
+      closeSync(fd);
+    }
   }
 }

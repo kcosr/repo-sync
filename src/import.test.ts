@@ -708,6 +708,21 @@ describe("importArchive", () => {
       expect(cacheRef("refs/heads/release")).toBeNull();
     });
 
+    it("keeps later records readable after a torn provenance write", async () => {
+      const { repo, commits } = standardRepo();
+      mkdirSync(join(cacheDir, "imports"), { recursive: true });
+      writeFileSync(getImportLogPath("tool", cacheDir), '{"repo":"tool","result":"crea');
+
+      const result = await runImport(repo.archive(zipPath()), commits[2]);
+      await runImport(join(root, "missing.zip"), commits[2]);
+
+      expect(result.outcome).toBe("created");
+      expect(readImportHistory("tool", cacheDir).map((r) => r.result)).toEqual([
+        "created",
+        "rejected",
+      ]);
+    });
+
     it("never rewrites an existing cache's configuration", async () => {
       const { repo, commits } = standardRepo();
       const zip = repo.archive(zipPath());
@@ -838,6 +853,26 @@ describe("importArchive", () => {
       expect(refresh.success).toBe(false);
       expect(refresh.error).toMatch(/has commits that are not in the cache/);
       expect(git(work.clonePath, ["rev-parse", "HEAD"])).toBe(local);
+    });
+
+    it("never abandons detached commits in a work clone", async () => {
+      const { repo, commits } = standardRepo();
+      await runImport(repo.archive(zipPath()), commits[2]);
+      const work = clone(entry(), { cacheDir });
+      git(work.clonePath, ["checkout", "--quiet", "--detach", commits[1]]);
+      expect(clone(entry(), { cacheDir }).success).toBe(true);
+
+      git(work.clonePath, ["checkout", "--quiet", "--detach"]);
+      writeFileSync(join(work.clonePath, "detached.txt"), "mine\n");
+      git(work.clonePath, ["add", "detached.txt"]);
+      git(work.clonePath, ["commit", "--quiet", "-m", "detached work"]);
+      const detached = git(work.clonePath, ["rev-parse", "HEAD"]);
+
+      const refresh = clone(entry(), { cacheDir });
+
+      expect(refresh.success).toBe(false);
+      expect(refresh.error).toMatch(/HEAD has commits that are not on any branch/);
+      expect(git(work.clonePath, ["rev-parse", "HEAD"])).toBe(detached);
     });
 
     it("succeeds without network access to the private remote", async () => {

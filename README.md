@@ -215,7 +215,8 @@ For archive-managed entries:
 
 - `pull` skips them in broad runs and refuses them by name.
 - `push` never force-pushes or prunes, so refs that exist only on private are kept. `status` lists them as `Kept on private`.
-- `clone` only fast-forwards an existing work clone and refuses to drop its local commits.
+- `status` and `push` fail if private cannot be fetched, rather than trusting stale refs.
+- `clone` only fast-forwards an existing work clone and refuses to drop its local commits, including commits on a detached HEAD.
 
 ### Provenance
 

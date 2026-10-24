@@ -34,6 +34,7 @@ function execGit(args: string[], cwd?: string, silent = true): ExecResult {
     cwd,
     encoding: "utf-8",
     stdio: silent ? "pipe" : "inherit",
+    maxBuffer: 64 * 1024 * 1024,
   });
   return {
     success: result.status === 0,
@@ -114,73 +115,40 @@ export function isImportedCache(repoPath: string): boolean {
 }
 
 export function getLocalRefs(repoPath: string): Map<string, string> {
+  const result = execGit(
+    ["for-each-ref", "--format=%(refname:lstrip=1) %(objectname)", "refs/heads/", "refs/tags/"],
+    repoPath,
+  );
+  if (!result.success) throw new Error(`Failed to list source refs: ${result.error}`);
   const refs = new Map<string, string>();
-
-  // Get branches
-  const branches = exec(
-    "git for-each-ref --format='%(refname:lstrip=2) %(objectname)' refs/heads/",
-    repoPath,
-  );
-  if (branches.success && branches.output) {
-    for (const line of branches.output.split("\n")) {
-      const [name, sha] = line.split(" ");
-      if (name && sha) {
-        refs.set(`heads/${name}`, sha);
-      }
-    }
+  for (const line of result.output.split("\n")) {
+    const [name, sha] = line.split(" ");
+    if (name && sha) refs.set(name, sha);
   }
-
-  // Get tags
-  const tags = exec(
-    "git for-each-ref --format='%(refname:lstrip=2) %(objectname)' refs/tags/",
-    repoPath,
-  );
-  if (tags.success && tags.output) {
-    for (const line of tags.output.split("\n")) {
-      const [name, sha] = line.split(" ");
-      if (name && sha) {
-        refs.set(`tags/${name}`, sha);
-      }
-    }
-  }
-
   return refs;
 }
 
 export function getRemoteRefs(repoPath: string, remoteName: string): Map<string, string> {
-  const refs = new Map<string, string>();
-
-  const result = exec(
-    `git for-each-ref --format='%(refname) %(objectname)' refs/remotes/${remoteName}/`,
+  const result = execGit(
+    ["for-each-ref", "--format=%(refname) %(objectname)", `refs/remotes/${remoteName}/`],
     repoPath,
   );
-
-  if (result.success && result.output) {
-    for (const line of result.output.split("\n")) {
-      const match = line.match(/^refs\/remotes\/[^/]+\/(.+) ([a-f0-9]+)$/);
-      // Git 2.48+ records the remote's default branch as the symbolic ref <remote>/HEAD.
-      if (match && match[1] !== "HEAD") {
-        const [, name, sha] = match;
-        refs.set(`heads/${name}`, sha);
-      }
-    }
+  if (!result.success) throw new Error(`Failed to list destination branches: ${result.error}`);
+  const refs = new Map<string, string>();
+  for (const line of result.output.split("\n")) {
+    const match = line.match(/^refs\/remotes\/[^/]+\/(.+) ([a-f0-9]+)$/);
+    // Git 2.48+ records the remote default as the symbolic ref <remote>/HEAD.
+    if (match && match[1] !== "HEAD") refs.set(`heads/${match[1]}`, match[2]);
   }
 
-  // For tags, we need to check the remote's tags directly
-  // After fetch, remote tags are stored locally as regular tags
-  // We compare against what we fetched from private
-  const tagsResult = exec(`git ls-remote --tags ${remoteName}`, repoPath);
-
-  if (tagsResult.success && tagsResult.output) {
-    for (const line of tagsResult.output.split("\n")) {
-      const match = line.match(/^([a-f0-9]+)\s+refs\/tags\/(.+)$/);
-      if (match && !match[2].endsWith("^{}")) {
-        const [, sha, name] = match;
-        refs.set(`tags/${name}`, sha);
-      }
-    }
+  // Do not fetch destination tags into the source namespace. Read exact tag IDs,
+  // excluding the peeled object lines returned for annotated tags.
+  const tags = execGit(["ls-remote", "--tags", remoteName], repoPath);
+  if (!tags.success) throw new Error(`Failed to list destination tags: ${tags.error}`);
+  for (const line of tags.output.split("\n")) {
+    const match = line.match(/^([a-f0-9]+)\s+refs\/tags\/(.+)$/);
+    if (match && !match[2].endsWith("^{}")) refs.set(`tags/${match[2]}`, match[1]);
   }
-
   return refs;
 }
 

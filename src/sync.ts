@@ -191,9 +191,21 @@ function inspectStatus(
     console.log("  Note: Could not fetch from private (may be empty or new)");
   }
 
-  // Get refs
-  const localRefs = getLocalRefs(repoPath);
-  const privateRefs = getRemoteRefs(repoPath, "private");
+  // An incomplete listing must never become a push or deletion plan.
+  let localRefs: Map<string, string>;
+  let privateRefs: Map<string, string>;
+  try {
+    localRefs = getLocalRefs(repoPath);
+    privateRefs = getRemoteRefs(repoPath, "private");
+  } catch (error) {
+    const message = `Could not inspect refs: ${error instanceof Error ? error.message : error}`;
+    return {
+      status: { ...baseStatus, error: message },
+      canPush: false,
+      hasChanges: false,
+      errors: [message],
+    };
+  }
 
   // Source branches stay pristine. Only verified generated destination tips are
   // compared using their original source parent, independent of the selected mode.

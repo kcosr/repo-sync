@@ -73,6 +73,19 @@ describe("source notices in repository sync", () => {
   const sourceHead = () => git(cachePath(), ["rev-parse", "refs/heads/main"]);
   const privateReadme = () => gitBytes(privateRepo, ["show", "refs/heads/main:README.md"]);
 
+  it("refuses remote pushes when destination refs cannot be listed", () => {
+    const repo = remoteRepo();
+    expect(pull(repo, { cacheDir }).success).toBe(true);
+    rmSync(privateRepo, { recursive: true, force: true });
+
+    const result = status(repo, { cacheDir });
+
+    expect(result.canPush).toBe(false);
+    expect(result.errors.join(" ")).toContain("Failed to list destination tags");
+    expect(push(repo, { cacheDir })).toMatchObject({ success: false, pushed: false });
+    expect(sourceHead()).toBe(sourceCommit);
+  });
+
   async function importSource(repo: ArchiveRepoConfig): Promise<void> {
     const archivePath = source.archive(join(root, `source-${archiveCount++}.zip`));
     const result = await importArchive(

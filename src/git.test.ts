@@ -2,7 +2,15 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cloneWorkDir, compareRefs, exec, getLocalRefs, getParentCommit, pushRefs } from "./git.js";
+import {
+  cloneWorkDir,
+  compareRefs,
+  exec,
+  getLocalRefs,
+  getParentCommit,
+  getRemoteRefs,
+  pushRefs,
+} from "./git.js";
 import type { RefComparison } from "./types.js";
 
 describe("git", () => {
@@ -188,6 +196,40 @@ describe("git", () => {
       expect(refs.get("tags/v1")).toBe(git(seedRepo, "rev-parse", "refs/tags/v1"));
       expect(refs.has("heads/heads/v1")).toBe(false);
       expect(refs.has("tags/tags/v1")).toBe(false);
+    });
+
+    it("reads source and destination tag listings larger than the default process buffer", () => {
+      const sha = git(seedRepo, "rev-parse", "HEAD");
+      const names = Array.from(
+        { length: 5000 },
+        (_, index) => `large-${String(index).padStart(5, "0")}-${"x".repeat(210)}`,
+      );
+      const originalRefs = git(seedRepo, "for-each-ref", "--format=%(objectname) %(refname)");
+      const entries = [
+        ...originalRefs.split("\n"),
+        ...names.map((name) => `${sha} refs/tags/${name}`),
+      ];
+      const packed = `# pack-refs with: sorted\n${entries.sort().join("\n")}\n`;
+      expect(Buffer.byteLength(packed)).toBeGreaterThan(1024 * 1024);
+      writeFileSync(join(seedRepo, ".git", "packed-refs"), packed);
+      writeFileSync(join(bareRepo, "packed-refs"), packed);
+
+      const local = getLocalRefs(seedRepo);
+      const remote = getRemoteRefs(seedRepo, "origin");
+
+      expect(local.size).toBe(5003); // Two branches and the original v1 tag.
+      expect(remote.size).toBe(5001);
+      for (const name of names) {
+        expect(local.get(`tags/${name}`)).toBe(sha);
+        expect(remote.get(`tags/${name}`)).toBe(sha);
+      }
+    });
+
+    it("reports failed ref listings instead of returning an incomplete map", () => {
+      expect(() => getLocalRefs(workRoot)).toThrow("Failed to list source refs");
+      expect(() => getRemoteRefs(seedRepo, "missing-remote")).toThrow(
+        "Failed to list destination tags",
+      );
     });
 
     it("fetches new branches and tags while fast-forwarding the default branch", () => {

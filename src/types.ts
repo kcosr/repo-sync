@@ -28,29 +28,6 @@ export interface Config {
   repos: RepoConfig[];
 }
 
-export type ImportOutcome = "created" | "fast-forward" | "unchanged";
-
-export interface ImportRecord {
-  repo: string;
-  result: ImportOutcome | "rejected";
-  importedAt: string;
-  archive: {
-    path: string;
-    sha256: string | null;
-    size: number | null;
-    root: string | null;
-    head: string | null;
-  };
-  commit: string;
-  branch: string;
-  previousCommit: string | null;
-  validation: {
-    passed: boolean;
-    checks: string[];
-    error?: string;
-  };
-}
-
 export interface RefComparison {
   name: string;
   localRef: string | null;
@@ -67,7 +44,6 @@ export interface RepoStatus {
   privateUrl: string;
   pulled: boolean;
   pulledAt?: Date;
-  lastImport?: ImportRecord;
   branches: RefComparison[];
   tags: RefComparison[];
   error?: string;

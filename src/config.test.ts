@@ -6,7 +6,6 @@ import {
   findRepo,
   getArchiveLimits,
   getCacheDir,
-  getImportRecordsDir,
   getRepoTempPath,
   getStagingDir,
   getWorkDir,
@@ -284,12 +283,9 @@ repos:
     });
   });
 
-  describe("import paths", () => {
-    it("should keep staging and provenance under cacheDir, outside repos and work", () => {
+  describe("getStagingDir", () => {
+    it("should keep staging under cacheDir, outside repos and work", () => {
       expect(getStagingDir("/tmp/custom-cache")).toBe("/tmp/custom-cache/staging");
-      expect(getImportRecordsDir("my-repo", "/tmp/custom-cache")).toBe(
-        "/tmp/custom-cache/imports/my-repo",
-      );
     });
   });
 });

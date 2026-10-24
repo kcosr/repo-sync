@@ -45,10 +45,6 @@ export function getStagingDir(cacheDir?: string): string {
   return join(resolveCacheDir(cacheDir), "staging");
 }
 
-export function getImportRecordsDir(repoName: string, cacheDir?: string): string {
-  return join(resolveCacheDir(cacheDir), "imports", repoName);
-}
-
 export function getRepoTempPath(repoName: string, cacheDir?: string): string {
   return join(getTempDir(cacheDir), `${repoName}.git`);
 }

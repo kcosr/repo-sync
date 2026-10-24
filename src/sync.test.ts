@@ -206,29 +206,13 @@ describe("sync", () => {
       expect(result).toContain("Not imported yet");
     });
 
-    it("should show the last import and keep private-only refs out of changes", () => {
+    it("should keep private-only refs out of archive-managed changes", () => {
       const result = formatStatus({
         status: {
           name: "tool",
           source: "archive",
           privateUrl: "git@private.com:vendor/tool.git",
           pulled: true,
-          lastImport: {
-            repo: "tool",
-            result: "created",
-            importedAt: "2026-10-24T10:00:00.000Z",
-            archive: {
-              path: "/archives/tool_source.zip",
-              sha256: "ab".repeat(32),
-              size: 100,
-              root: "tool",
-              head: "detached",
-            },
-            commit: "cd".repeat(20),
-            branch: "main",
-            previousCommit: null,
-            validation: { passed: true, checks: [] },
-          },
           branches: [
             {
               name: "main",
@@ -245,8 +229,6 @@ describe("sync", () => {
         errors: [],
       });
 
-      expect(result).toContain("Imported: ");
-      expect(result).toContain(`(main at ${"cd".repeat(6)}, archive sha256 ${"ab".repeat(6)})`);
       expect(result).toContain("Up to date ✓");
       expect(result).toContain(
         "Kept on private (not managed by imports):\n    branch old\n    tag v1",

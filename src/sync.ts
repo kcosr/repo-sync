@@ -19,14 +19,7 @@ import {
   pushRefs,
   repoExists,
 } from "./git.js";
-import { getLastImport } from "./import.js";
-import type {
-  ImportRecord,
-  RefComparison,
-  RemoteRepoConfig,
-  RepoConfig,
-  RepoStatus,
-} from "./types.js";
+import type { RefComparison, RemoteRepoConfig, RepoConfig, RepoStatus } from "./types.js";
 
 export interface PullResult {
   success: boolean;
@@ -151,7 +144,6 @@ export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
 
   baseStatus.pulled = true;
   if (archive) {
-    baseStatus.lastImport = getLastImport(repo.name, options?.cacheDir);
     // Imports never rewrite cache configuration, so pick up private URL changes here.
     const remoteResult = addRemote(repoPath, "private", repo.private);
     if (!remoteResult.success) {
@@ -368,11 +360,6 @@ export function formatRefComparison(ref: RefComparison): string {
   }
 }
 
-function formatImport(record: ImportRecord): string {
-  const when = new Date(record.importedAt).toLocaleString();
-  return `${when} (${record.branch} at ${record.commit.substring(0, 12)}, archive sha256 ${record.archive.sha256?.substring(0, 12)})`;
-}
-
 export function formatStatus(result: StatusResult): string {
   const lines: string[] = [];
   const { status: s } = result;
@@ -391,9 +378,6 @@ export function formatStatus(result: StatusResult): string {
     return lines.join("\n");
   }
 
-  if (s.lastImport) {
-    lines.push(`  Imported: ${formatImport(s.lastImport)}`);
-  }
   if (s.pulledAt) {
     lines.push(`  Pulled:  ${s.pulledAt.toLocaleString()}`);
   }

@@ -1,4 +1,4 @@
-import { type ExecSyncOptions, execSync } from "node:child_process";
+import { type ExecSyncOptions, execSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -28,6 +28,22 @@ export function exec(command: string, cwd?: string, silent = true): ExecResult {
       error: error.stderr?.trim() || error.message,
     };
   }
+}
+
+function execGit(args: string[], cwd?: string, silent = true): ExecResult {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    stdio: silent ? "pipe" : "inherit",
+  });
+  return {
+    success: result.status === 0,
+    output: result.stdout?.trim() || "",
+    error:
+      result.status === 0
+        ? undefined
+        : result.stderr?.trim() || result.error?.message || `Git ${args[0]} failed`,
+  };
 }
 
 export function cloneMirror(publicUrl: string, targetPath: string): ExecResult {
@@ -81,7 +97,7 @@ export function getLocalRefs(repoPath: string): Map<string, string> {
 
   // Get branches
   const branches = exec(
-    "git for-each-ref --format='%(refname:short) %(objectname)' refs/heads/",
+    "git for-each-ref --format='%(refname:lstrip=2) %(objectname)' refs/heads/",
     repoPath,
   );
   if (branches.success && branches.output) {
@@ -95,7 +111,7 @@ export function getLocalRefs(repoPath: string): Map<string, string> {
 
   // Get tags
   const tags = exec(
-    "git for-each-ref --format='%(refname:short) %(objectname)' refs/tags/",
+    "git for-each-ref --format='%(refname:lstrip=2) %(objectname)' refs/tags/",
     repoPath,
   );
   if (tags.success && tags.output) {
@@ -148,12 +164,12 @@ export function getRemoteRefs(repoPath: string, remoteName: string): Map<string,
 }
 
 export function isAncestor(repoPath: string, ancestor: string, descendant: string): boolean {
-  const result = exec(`git merge-base --is-ancestor ${ancestor} ${descendant}`, repoPath);
+  const result = execGit(["merge-base", "--is-ancestor", ancestor, descendant], repoPath);
   return result.success;
 }
 
 export function getCommitCount(repoPath: string, from: string, to: string): number {
-  const result = exec(`git rev-list --count ${from}..${to}`, repoPath);
+  const result = execGit(["rev-list", "--count", `${from}..${to}`], repoPath);
   if (result.success) {
     return Number.parseInt(result.output, 10) || 0;
   }
@@ -171,7 +187,8 @@ export function compareRefs(
   // Check all local refs
   for (const [refName, localSha] of localRefs) {
     const privateSha = privateRefs.get(refName) || null;
-    const [type, name] = refName.split("/", 2);
+    const [type, ...nameParts] = refName.split("/");
+    const name = nameParts.join("/");
     const target = type === "tags" ? tags : branches;
 
     if (!privateSha) {
@@ -230,7 +247,8 @@ export function compareRefs(
   // Check for refs that exist on private but not locally (removed from public)
   for (const [refName, privateSha] of privateRefs) {
     if (!localRefs.has(refName)) {
-      const [type, name] = refName.split("/", 2);
+      const [type, ...nameParts] = refName.split("/");
+      const name = nameParts.join("/");
       const target = type === "tags" ? tags : branches;
       target.push({
         name,
@@ -275,7 +293,7 @@ export function getDefaultBranch(repoPath: string): string {
 }
 
 export function getParentCommit(repoPath: string, commitRef: string): string | null {
-  const result = exec(`git rev-parse ${commitRef}^`, repoPath);
+  const result = execGit(["rev-parse", `${commitRef}^`], repoPath);
   if (result.success && result.output) {
     return result.output;
   }
@@ -284,7 +302,7 @@ export function getParentCommit(repoPath: string, commitRef: string): string | n
 
 export function isSourceNoticeCommit(repoPath: string, commitRef: string): boolean {
   // Check if the commit message matches our notice commit
-  const result = exec(`git log -1 --format=%s ${commitRef}`, repoPath);
+  const result = execGit(["log", "-1", "--format=%s", commitRef], repoPath);
   if (result.success) {
     return result.output === "Add source repository notice";
   }
@@ -315,12 +333,15 @@ function getWorkClonePath(options?: SourceNoticeOptions): {
 }
 
 /**
- * `checkout -B` resets `branch` and moves HEAD to `origin/<branch>`. Report whether that would
- * drop commits: local commits on the branch, or a detached HEAD that no other branch contains.
+ * Report commits a refresh cannot preserve: local commits on the target branch,
+ * or a detached HEAD that no other branch contains.
  */
 function findUnpreservedCommits(clonePath: string, branch: string): string | undefined {
-  const target = `origin/${branch}`;
-  const localBranch = exec(`git rev-parse --verify --quiet refs/heads/${branch}`, clonePath);
+  const target = `refs/remotes/origin/${branch}`;
+  const localBranch = execGit(
+    ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+    clonePath,
+  );
   if (localBranch.success && !isAncestor(clonePath, `refs/heads/${branch}`, target)) {
     return `Work clone branch '${branch}' has commits that are not in the cache: ${clonePath}. Move or remove them before running clone.`;
   }
@@ -346,9 +367,15 @@ function prepareWorkClone(
   mkdirSync(dirname(clonePath), { recursive: true });
 
   if (!existsSync(clonePath)) {
-    const cloneResult = exec(
-      `git clone "${repoPath}" "${clonePath}" --branch ${branch} --single-branch`,
-    );
+    const cloneResult = execGit([
+      "clone",
+      "--branch",
+      branch,
+      ...(fastForwardOnly ? [] : ["--single-branch"]),
+      "--",
+      repoPath,
+      clonePath,
+    ]);
     if (!cloneResult.success) {
       return {
         success: false,
@@ -391,7 +418,7 @@ function prepareWorkClone(
       };
     }
     if (currentOrigin.output !== repoPath) {
-      const updateOriginResult = exec(`git remote set-url origin "${repoPath}"`, clonePath);
+      const updateOriginResult = execGit(["remote", "set-url", "origin", repoPath], clonePath);
       if (!updateOriginResult.success) {
         return {
           success: false,
@@ -401,7 +428,23 @@ function prepareWorkClone(
       }
     }
 
-    const fetchResult = exec("git fetch origin", clonePath);
+    if (fastForwardOnly) {
+      const refspecResult = execGit(
+        ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        clonePath,
+      );
+      if (!refspecResult.success) {
+        return {
+          success: false,
+          output: "",
+          error: `Failed to configure work clone branches: ${refspecResult.error}`,
+        };
+      }
+    }
+    const fetchResult = execGit(
+      ["fetch", ...(fastForwardOnly ? ["--tags"] : []), "origin"],
+      clonePath,
+    );
     if (!fetchResult.success) {
       return {
         success: false,
@@ -418,13 +461,33 @@ function prepareWorkClone(
     }
   }
 
-  const checkoutResult = exec(`git checkout -B ${branch} origin/${branch}`, clonePath);
+  const target = `refs/remotes/origin/${branch}`;
+  const localBranch = execGit(
+    ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+    clonePath,
+  );
+  const checkoutResult = fastForwardOnly
+    ? localBranch.success
+      ? execGit(["checkout", branch, "--"], clonePath)
+      : execGit(["checkout", "--track", "-b", branch, target], clonePath)
+    : execGit(["checkout", "-B", branch, target], clonePath);
   if (!checkoutResult.success) {
     return {
       success: false,
       output: "",
       error: `Failed to prepare branch '${branch}' in work clone: ${checkoutResult.error}`,
     };
+  }
+
+  if (fastForwardOnly) {
+    const mergeResult = execGit(["merge", "--ff-only", "--no-edit", target], clonePath);
+    if (!mergeResult.success) {
+      return {
+        success: false,
+        output: "",
+        error: `Failed to fast-forward branch '${branch}' in work clone: ${mergeResult.error}`,
+      };
+    }
   }
 
   return { success: true, output: "" };
@@ -553,7 +616,7 @@ export function addSourceNotice(
     }
 
     // Push back to the bare repo
-    const pushResult = exec(`git push origin ${branch}`, tempDir);
+    const pushResult = execGit(["push", "origin", branch], tempDir);
     if (!pushResult.success) {
       return {
         success: false,

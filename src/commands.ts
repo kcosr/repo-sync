@@ -11,7 +11,7 @@ repo-sync - Sync public repositories to private mirrors
 
 Usage:
   repo-sync pull [repo-name]     Clone/fetch from public repos
-  repo-sync import <repo-name> --archive <zip> --commit <sha> --branch <branch>
+  repo-sync import <repo-name> --archive <zip>
                                  Import a source ZIP into an archive-managed repo
   repo-sync clone [repo-name]    Create/update local work clone
   repo-sync status [repo-name]   Show sync status
@@ -21,14 +21,12 @@ Usage:
 Options:
   -c, --config <path>   Path to config file (default: ./repo-sync.yaml)
   --archive <zip>       Source ZIP with complete Git history (import)
-  --commit <sha>        Full commit ID the archive must be at (import)
-  --branch <branch>     Branch to associate with the commit (import)
   -h, --help            Show this help message
 
 Examples:
   repo-sync pull                 Pull all configured repos
   repo-sync pull my-lib          Pull a specific repo
-  repo-sync import my-tool --archive my-tool_source.zip --commit <sha> --branch main
+  repo-sync import my-tool --archive my-tool_source.zip
   repo-sync clone my-lib         Prepare local work clone for a repo
   repo-sync status               Show status of all repos
   repo-sync push                 Push all repos to private
@@ -41,18 +39,14 @@ export interface ParsedArgs {
   repoName?: string;
   configPath?: string;
   archive?: string;
-  commit?: string;
-  branch?: string;
   yes: boolean;
   help: boolean;
 }
 
-const VALUE_OPTIONS: Record<string, "configPath" | "archive" | "commit" | "branch"> = {
+const VALUE_OPTIONS: Record<string, "configPath" | "archive"> = {
   "-c": "configPath",
   "--config": "configPath",
   "--archive": "archive",
-  "--commit": "commit",
-  "--branch": "branch",
 };
 
 export function parseArgs(args: string[]): ParsedArgs {
@@ -82,9 +76,8 @@ export function parseArgs(args: string[]): ParsedArgs {
     }
   }
 
-  const importOptions = [parsed.archive, parsed.commit, parsed.branch];
-  if (parsed.command !== "import" && importOptions.some((value) => value !== undefined)) {
-    throw new Error("--archive, --commit and --branch are only valid with 'import'");
+  if (parsed.command !== "import" && parsed.archive !== undefined) {
+    throw new Error("--archive is only valid with 'import'");
   }
 
   return parsed;
@@ -105,7 +98,7 @@ function selectRepos(config: Config, repoName: string | undefined): RepoConfig[]
 }
 
 function importHint(name: string): string {
-  return `repo-sync import ${name} --archive <zip> --commit <sha> --branch <branch>`;
+  return `repo-sync import ${name} --archive <zip>`;
 }
 
 function commandPull(repos: RepoConfig[], cacheDir: string, explicit: boolean): number {
@@ -157,46 +150,25 @@ async function commandImport(
     );
     return 1;
   }
-  const { archive, commit, branch } = args;
-  if (!archive || !commit || !branch) {
-    console.error(
-      `Error: import requires --archive, --commit and --branch\n  ${importHint(repo.name)}`,
-    );
+  const { archive } = args;
+  if (!archive) {
+    console.error(`Error: import requires --archive\n  ${importHint(repo.name)}`);
     return 1;
   }
 
   console.log(`Importing ${repo.name}...\n`);
   const result = await importArchive(
     repo,
-    { archivePath: archive, commit, branch },
+    { archivePath: archive },
     { cacheDir, limits: getArchiveLimits(config) },
   );
 
-  if (result.record?.archive.sha256) {
-    console.log(`  Archive: ${result.record.archive.path}`);
-    console.log(`  SHA-256: ${result.record.archive.sha256}`);
-  }
-
   if (!result.success) {
     console.error(`  ✗ Import rejected: ${result.error}`);
-    if (result.record) {
-      console.error(`  Previous cache state preserved. Provenance: ${result.provenancePath}`);
-    }
     return 1;
   }
 
-  const short = commit.substring(0, 12);
-  if (result.outcome === "unchanged") {
-    console.log(`  - Already imported: ${branch} is at ${short} (no changes)`);
-  } else if (result.outcome === "fast-forward") {
-    const previous = result.record?.previousCommit?.substring(0, 12);
-    console.log(
-      `  ✓ Fast-forwarded ${branch}: ${previous} → ${short} (+${result.aheadCount} commits)`,
-    );
-  } else {
-    console.log(`  ✓ Created ${branch} at ${short}`);
-  }
-  console.log(`  Provenance: ${result.provenancePath}`);
+  console.log(`  ✓ ${result.isNew ? "Imported" : "Updated"}`);
   return 0;
 }
 

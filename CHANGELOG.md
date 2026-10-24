@@ -4,20 +4,29 @@
 
 ### Breaking Changes
 
+- Simplified `import` to accept `--archive` only; removed `--commit` and `--branch` options ([#6](https://github.com/kcosr/repo-sync/pull/6))
+- Removed `markSourceDeleteClone`; source notices no longer create work clones. Use `clone` explicitly ([#6](https://github.com/kcosr/repo-sync/pull/6))
+
 ### Added
 
-- Added `import` command and `source: archive` entries to seed and update repositories from source ZIPs with complete Git history. Imports are local, validated and transactional, and record provenance in `<cacheDir>/imports/`. Broad `pull` skips archive entries, and `push` never force-updates or prunes them ([#5](https://github.com/kcosr/repo-sync/pull/5))
+- Added `import` command and `source: archive` entries to seed and update repositories from source ZIPs with complete Git history. Broad `pull` skips archive entries ([#5](https://github.com/kcosr/repo-sync/pull/5))
+- Added per-repository `sourceNotice: linked | generic | none`, with legacy `markSource` compatibility and generic notices for ZIP sources ([#6](https://github.com/kcosr/repo-sync/pull/6))
 
 ### Changed
 
 - CLI now rejects unknown options, options missing a value and extra positional arguments ([#5](https://github.com/kcosr/repo-sync/pull/5))
+- ZIP imports now synchronize all branches and tags atomically, require fast-forward branches and unchanged existing tags, and retain refs omitted by subsequent archives ([#6](https://github.com/kcosr/repo-sync/pull/6))
+- Source notices are separate generated commits on private, preserving cached source history and unrelated README content when modes change ([#6](https://github.com/kcosr/repo-sync/pull/6))
 
 ### Fixed
 
 - Fixed `status` reporting the `<remote>/HEAD` ref that Git 2.48+ creates as a branch deleted from public ([#5](https://github.com/kcosr/repo-sync/pull/5))
+- Protected pushes with atomic ref updates, exact default-branch leases and complete ref listings for large mirrors ([#6](https://github.com/kcosr/repo-sync/pull/6))
+- Preserved archive work-clone commits reachable through local branches, tags or cached branches during refresh ([#6](https://github.com/kcosr/repo-sync/pull/6))
 
 ### Removed
 
+- Removed archive provenance records and manual ref rollback machinery in favor of Git's atomic fetch ([#6](https://github.com/kcosr/repo-sync/pull/6))
 ## [0.0.4] - 2026-02-17
 
 ### Breaking Changes

@@ -29,8 +29,7 @@ repos:
   - name: lodash
     public: https://github.com/lodash/lodash.git
     private: git@gitlab.company.com:vendor/lodash.git
-    markSource: true
-    markSourceDeleteClone: false
+    sourceNotice: linked
   - name: express
     public: https://github.com/expressjs/express.git
     private: git@gitlab.company.com:vendor/express.git
@@ -87,25 +86,20 @@ node dist/cli.js clone              # Prepare work clones for all repos
 node dist/cli.js clone lodash       # Prepare work clone for one repo
 ```
 
-Requires the repo to be pulled first (`pull`).
+Requires the repo to be pulled or imported first.
 
-### `import <repo-name> --archive <zip> --commit <sha> --branch <branch>`
+### `import <repo-name> --archive <zip>`
 
-Seed or update an [archive-managed](#archive-imports) repo from a source ZIP. Runs locally with no network access.
+Seed or update an [archive-managed](#archive-imports) repo from the branches and tags in a source ZIP. Runs locally with no network access.
 
 ```bash
 node dist/cli.js import my-tool \
-  --archive /archives/my-tool_20261014T134606Z_ab368155984f_source.zip \
-  --commit ab368155984f4656e2d94ebb622e0dd5a9e901ac \
-  --branch main
+  --archive /archives/my-tool_20261014T134606Z_ab368155984f_source.zip
 ```
-
-- `--commit` is the full commit ID the archive must be at.
-- `--branch` is the branch that commit is published as, whatever branch (or detached HEAD) the archive was on.
 
 ### `push [repo-name]`
 
-Push to private mirrors. Only pushes if local (from public) is ahead of private.
+Push cached branches and tags to private mirrors and apply the configured source notice.
 
 ```bash
 node dist/cli.js push              # Push all repos
@@ -113,13 +107,13 @@ node dist/cli.js push lodash       # Push a specific repo
 ```
 
 **Safety checks:**
-- Won't push if private has commits not in public (shouldn't happen)
+- Protects private commits beyond recognized generated source notices
 - Won't push if refs have diverged (needs manual intervention)
 - Skips repos that are already up to date
 
 ### `clean [repo-name]`
 
-Remove cached mirror clones from `<cacheDir>/repos/` (default: `~/.repo-sync/repos/`). Import provenance in `<cacheDir>/imports/` is kept.
+Remove cached mirror clones from `<cacheDir>/repos/` (default: `~/.repo-sync/repos/`).
 
 ```bash
 node dist/cli.js clean             # Clean all
@@ -140,43 +134,47 @@ Edit `repo-sync.yaml` in this repo:
 ```yaml
 cacheDir: <path>            # Optional: root data dir (default: ~/.repo-sync)
 archiveLimits:              # Optional: bounds for archive imports
-  maxBytes: 4294967296      # Total extracted bytes (default: 4 GiB)
+  maxBytes: 4294967296      # Total declared ZIP contents (default: 4 GiB)
   maxEntries: 200000        # ZIP entries (default: 200000)
 
 repos:
   - name: repo-name          # Identifier (used in commands and cache storage)
     public: <url>            # Public repo URL (HTTPS, no auth needed)
     private: <url>           # Private repo URL (SSH or HTTPS with auth)
-    markSource: true         # Optional: add notice to README showing source
-    markSourceDeleteClone: false     # Optional: delete markSource working clone after push (default: true)
+    sourceNotice: linked     # Optional: linked, generic or none (default: none)
 
   - name: local-id           # Identifier; independent of the archive and private repo names
     source: archive          # Seeded and updated by `import`; no public URL
     private: <url>           # Private repo URL
+    sourceNotice: generic    # Optional: archives support generic or none
 ```
 
-`source` defaults to `remote`. Archive-managed entries cannot set `public`, `markSource` or `markSourceDeleteClone`.
+`source` defaults to `remote`. Archive-managed entries cannot set `public` or use a linked source notice.
 
-### `markSource` Option
+### Source notices
 
-When `markSource: true` is set, the tool adds a notice to the top of the README indicating where the repository was mirrored from:
+Set `sourceNotice` independently for each repository:
 
-```markdown
+| Mode | Generated README banner | Sources |
+|------|-------------------------|---------|
+| `linked` | A mirror notice linking to the configured `public` URL | Remote only |
+| `generic` | A mirror notice without a source URL | Remote or archive |
+| `none` | No generated notice (default) | Remote or archive |
+
+The generic banner uses the same format as the linked banner:
+
 > **📦 Mirrored Repository**
 >
-> This repository is automatically mirrored from [https://github.com/org/repo](https://github.com/org/repo).
+> This repository is automatically mirrored from an external repository.
 > Do not commit directly to this repository.
-```
 
-This adds one commit on top of the public history. On each sync, this commit is recreated.
+Enabled notices add one generated commit above the source tip on the private default branch. Cached source branches and work clones stay unchanged, preserving the original source commits and their IDs. Switching to `none` restores the source branch tip without a generated notice. Replacing or removing a verified generated notice uses an exact `--force-with-lease` check to protect unrelated private commits.
 
-When `markSource` is enabled, these optional per-repo settings control the working clone used to create that commit:
+Notice settings control the generated banner only: `generic` does not remove URLs already present in repository files, configuration or history.
 
-- `markSourceDeleteClone`: Whether to delete the working clone after each push. Defaults to `true`.
+Existing configurations may use `markSource: true` for `linked` or `markSource: false` for `none`. Setting both `markSource` and `sourceNotice` is an error. Archive entries reject `linked`, including legacy `markSource: true`; use `sourceNotice: generic` for an archive notice.
 
-If `markSourceDeleteClone: false`, the tool keeps and reuses a clone at:
-
-`<cacheDir>/work/<repo-name>` (default: `~/.repo-sync/work/<repo-name>`)
+The obsolete `markSourceDeleteClone` setting is rejected. Notices no longer create work clones; use `repo-sync clone` when you want a working checkout.
 
 ## Archive imports
 
@@ -184,60 +182,41 @@ Some sources are delivered as ZIP archives rather than reachable remotes. An ent
 
 ### Archive requirements
 
-The ZIP must contain exactly one top-level directory holding a checkout with a real `.git` directory:
+The ZIP must contain exactly one top-level directory with a real, self-contained `.git` directory and at least one named branch:
 
 ```
 my-tool/
-  .git/               # full, self-contained history
-  ARCHIVE-INFO.json   # optional, may be untracked
-  src/ ...            # working tree at the archived commit
+  .git/       # complete Git history, branches and tags
+  src/ ...    # optional working tree; ignored by import
 ```
 
-Import rejects the archive unless:
+Linked worktrees, shallow history and external object alternates are not self-contained. Imported history must pass Git integrity checks. Unsafe ZIP paths, unsupported entries and archives exceeding `archiveLimits` are rejected.
 
-- **History is self-contained.** No `.git` worktree pointer file, `commondir`, `shallow` file, grafts, object alternates or reftable storage. The selected commit and every object it reaches must be present and pass `git fsck`.
-- **HEAD is the expected commit.** The archive's HEAD (a branch or detached) must resolve to `--commit`.
-- **The source tree is clean.** Files and modes must match the commit exactly, with no modified, deleted or untracked files. The only exception is an untracked `ARCHIVE-INFO.json` beside `.git`.
-- **The ZIP is safe to extract.** It may contain only relative paths without `..`, regular files, directories and symlinks that stay inside the top-level directory. Special files, nested `.git` directories, encrypted entries and overlapping entries are rejected, as are entries that fail size or CRC checks or exceed `archiveLimits`.
+The working tree is ignored: modified, missing and untracked files do not affect the import. Only committed Git history is copied into the cache. Archive metadata files are also ignored.
 
-### What import does
+### Import and sync behavior
 
-1. Hashes the ZIP and extracts it into a new staging directory under `<cacheDir>/staging/`. The ZIP itself is never modified.
-2. Copies the archive's Git objects into a fresh quarantine repository and verifies them there. The archive's `.git/config`, hooks, index, attributes and remotes are never used, and all Git commands run with repo-sync's own settings, so nothing supplied by the archive is executed.
-3. Transfers only the history of `--commit` into `<cacheDir>/repos/<name>.git` and points `refs/heads/<branch>` at it. Commit IDs are preserved. Other archived branches and tags are not imported.
-4. Removes the staging directory, whether the import succeeded or failed.
+Import reads the archive's Git data into a temporary repository, verifies it using controlled Git settings, then updates `<cacheDir>/repos/<name>.git`. Archive hooks and execution settings are not used. The ZIP is never modified, and staging files are removed when the import finishes.
 
-Activation happens only after every check passes. A new cache is moved into place in one rename, and an existing cache is updated with a compare-and-swap ref update. A rejected or failed import leaves the previous cache untouched. If the provenance record cannot be published, activation is rolled back. Import never changes an existing cache's configuration (`status` and `push` pick up `private` URL changes from `repo-sync.yaml`), and it never touches work clones.
+All named branches and tags are imported with their original names and object IDs. Existing branches must fast-forward; existing tags cannot be replaced. Branches and tags omitted from a later archive stay in the cache. Re-importing the same ZIP is harmless. To replace rewritten history, run `clean` and import again.
 
-Updates must fast-forward. An archive whose commit is older than, or has diverged from, the cached branch is rejected rather than force-updated. To replace rewritten history, run `clean` and import again. Branches imported earlier stay in the cache even if a later archive no longer contains them. Re-importing the same archive is harmless and reports `Already imported`.
+A new cache uses the archive's default branch. For a detached HEAD, it selects a branch at that commit when available, otherwise the first named branch. Later imports preserve the cache's default branch.
 
 For archive-managed entries:
 
 - `pull` skips them in broad runs and refuses them by name.
-- `push` never force-pushes or prunes, so refs that exist only on private are kept. `status` lists them as `Kept on private`.
+- `push` requires source branch updates to fast-forward and keeps refs that exist only on private. Replacing a verified generated notice is the sole force-with-lease exception. `status` lists private-only refs as `Kept on private`.
 - `status` and `push` fail if private cannot be fetched, rather than trusting stale refs.
-- `clone` only fast-forwards an existing work clone and refuses to drop its local commits, including commits on a detached HEAD.
+- `clone` fetches all cached branches, only fast-forwards an existing work clone and refuses to drop its local commits, including commits on a detached HEAD.
 
-### Provenance
-
-Every import attempt writes one JSON file to `<cacheDir>/imports/<name>/`, outside the imported source tree. Records are written completely and then renamed into place, so a partial record is never visible. Each record contains:
-
-- the archive path, SHA-256, size and top-level directory
-- the archive HEAD (a ref name, or `detached`)
-- the commit and branch
-- the previous commit, if any
-- the result: `created`, `fast-forward`, `unchanged` or `rejected`
-- the import time
-- the validation checks that passed, or the rejection reason
-
-`status` shows the most recent successful import.
+Import never changes work clones. Repositories configured with a public URL retain the usual remote pull and mirror push behavior.
 
 ### Archive workflow
 
 ```bash
-node dist/cli.js import my-tool --archive my-tool_source.zip --commit <sha> --branch main
-node dist/cli.js status my-tool   # Compare the imported branch with private
-node dist/cli.js push my-tool     # Publish (fast-forward only, no deletions)
+node dist/cli.js import my-tool --archive my-tool_source.zip
+node dist/cli.js status my-tool   # Compare imported branches and tags with private
+node dist/cli.js push my-tool     # Publish branches/tags; keep private-only refs
 node dist/cli.js clone my-tool    # Working clone at <cacheDir>/work/my-tool
 ```
 
@@ -251,7 +230,7 @@ node dist/cli.js clone my-tool    # Working clone at <cacheDir>/work/my-tool
 
 4. **Push**: Pushes branches and tags to private with prune, syncing updates and deletions
 
-Push sync keeps branches/tags aligned with public history. For archive-managed entries, push only fast-forwards and never deletes.
+Push sync keeps branches/tags aligned with public history. Archive-managed entries preserve private-only refs and reject source-history rewrites; source notices follow the checks described above.
 
 ## Typical Workflow
 

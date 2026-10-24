@@ -1,18 +1,20 @@
 export type RepoSource = "remote" | "archive";
 
-export interface RemoteRepoConfig {
+export type SourceNoticeMode = "linked" | "generic" | "none";
+
+interface RepoConfigBase {
   name: string;
-  source?: "remote";
-  public: string;
   private: string;
-  markSource?: boolean;
-  markSourceDeleteClone?: boolean;
+  sourceNotice?: SourceNoticeMode;
 }
 
-export interface ArchiveRepoConfig {
-  name: string;
+export interface RemoteRepoConfig extends RepoConfigBase {
+  source?: "remote";
+  public: string;
+}
+
+export interface ArchiveRepoConfig extends RepoConfigBase {
   source: "archive";
-  private: string;
 }
 
 export type RepoConfig = RemoteRepoConfig | ArchiveRepoConfig;
@@ -26,29 +28,6 @@ export interface Config {
   cacheDir?: string;
   archiveLimits?: Partial<ArchiveLimits>;
   repos: RepoConfig[];
-}
-
-export type ImportOutcome = "created" | "fast-forward" | "unchanged";
-
-export interface ImportRecord {
-  repo: string;
-  result: ImportOutcome | "rejected";
-  importedAt: string;
-  archive: {
-    path: string;
-    sha256: string | null;
-    size: number | null;
-    root: string | null;
-    head: string | null;
-  };
-  commit: string;
-  branch: string;
-  previousCommit: string | null;
-  validation: {
-    passed: boolean;
-    checks: string[];
-    error?: string;
-  };
 }
 
 export interface RefComparison {
@@ -67,7 +46,7 @@ export interface RepoStatus {
   privateUrl: string;
   pulled: boolean;
   pulledAt?: Date;
-  lastImport?: ImportRecord;
+  sourceNoticeChanged?: boolean;
   branches: RefComparison[];
   tags: RefComparison[];
   error?: string;

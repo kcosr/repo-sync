@@ -1,6 +1,5 @@
-import { type ExecSyncOptions, execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { type ExecSyncOptions, execSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { RefComparison } from "./types.js";
 
@@ -30,6 +29,23 @@ export function exec(command: string, cwd?: string, silent = true): ExecResult {
   }
 }
 
+function execGit(args: string[], cwd?: string, silent = true): ExecResult {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    stdio: silent ? "pipe" : "inherit",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return {
+    success: result.status === 0,
+    output: result.stdout?.trim() || "",
+    error:
+      result.status === 0
+        ? undefined
+        : result.stderr?.trim() || result.error?.message || `Git ${args[0]} failed`,
+  };
+}
+
 export function cloneMirror(publicUrl: string, targetPath: string): ExecResult {
   return exec(`git clone --mirror "${publicUrl}" "${targetPath}"`);
 }
@@ -52,24 +68,46 @@ export function addRemote(repoPath: string, name: string, url: string): ExecResu
 }
 
 export function fetchRemote(repoPath: string, remoteName: string, prune = false): ExecResult {
-  return exec(`git fetch ${prune ? "--prune " : ""}${remoteName}`, repoPath);
+  return execGit(["fetch", "--no-tags", ...(prune ? ["--prune"] : []), remoteName], repoPath);
 }
 
-export function pushMirror(repoPath: string, remoteName: string): ExecResult {
-  return exec(
-    `git push --prune ${remoteName} "+refs/heads/*:refs/heads/*" "+refs/tags/*:refs/tags/*"`,
+export function getRemoteBranchHead(
+  repoPath: string,
+  remoteName: string,
+  branch: string,
+): ExecResult {
+  const result = execGit(
+    ["ls-remote", "--exit-code", "--refs", remoteName, `refs/heads/${branch}`],
     repoPath,
-    false,
   );
+  return { ...result, output: result.output.split(/\s/)[0] ?? "" };
 }
 
-export function pushRefs(repoPath: string, remoteName: string): ExecResult {
-  // Archive-managed refs only move forward and are never deleted on the remote.
-  return exec(
-    `git push ${remoteName} "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*"`,
-    repoPath,
-    false,
-  );
+export interface PushRefsOptions {
+  mirror?: boolean;
+  branchOverride?: { branch: string; commit: string; expected: string };
+}
+
+export function pushRefs(
+  repoPath: string,
+  remoteName: string,
+  options: PushRefsOptions = {},
+): ExecResult {
+  const args = ["push", "--atomic"];
+  if (options.mirror) args.push("--prune");
+  if (options.branchOverride) {
+    args.push(
+      `--force-with-lease=refs/heads/${options.branchOverride.branch}:${options.branchOverride.expected}`,
+    );
+  }
+  const force = options.mirror ? "+" : "";
+  args.push(remoteName, `${force}refs/heads/*:refs/heads/*`, `${force}refs/tags/*:refs/tags/*`);
+  if (options.branchOverride) {
+    // Git gives an explicit refspec priority over a matching wildcard. Source
+    // refs stay untouched, and the argument list stays bounded for large mirrors.
+    args.push(`${options.branchOverride.commit}:refs/heads/${options.branchOverride.branch}`);
+  }
+  return execGit(args, repoPath, false);
 }
 
 export function isImportedCache(repoPath: string): boolean {
@@ -77,83 +115,50 @@ export function isImportedCache(repoPath: string): boolean {
 }
 
 export function getLocalRefs(repoPath: string): Map<string, string> {
+  const result = execGit(
+    ["for-each-ref", "--format=%(refname:lstrip=1) %(objectname)", "refs/heads/", "refs/tags/"],
+    repoPath,
+  );
+  if (!result.success) throw new Error(`Failed to list source refs: ${result.error}`);
   const refs = new Map<string, string>();
-
-  // Get branches
-  const branches = exec(
-    "git for-each-ref --format='%(refname:short) %(objectname)' refs/heads/",
-    repoPath,
-  );
-  if (branches.success && branches.output) {
-    for (const line of branches.output.split("\n")) {
-      const [name, sha] = line.split(" ");
-      if (name && sha) {
-        refs.set(`heads/${name}`, sha);
-      }
-    }
+  for (const line of result.output.split("\n")) {
+    const [name, sha] = line.split(" ");
+    if (name && sha) refs.set(name, sha);
   }
-
-  // Get tags
-  const tags = exec(
-    "git for-each-ref --format='%(refname:short) %(objectname)' refs/tags/",
-    repoPath,
-  );
-  if (tags.success && tags.output) {
-    for (const line of tags.output.split("\n")) {
-      const [name, sha] = line.split(" ");
-      if (name && sha) {
-        refs.set(`tags/${name}`, sha);
-      }
-    }
-  }
-
   return refs;
 }
 
 export function getRemoteRefs(repoPath: string, remoteName: string): Map<string, string> {
-  const refs = new Map<string, string>();
-
-  const result = exec(
-    `git for-each-ref --format='%(refname) %(objectname)' refs/remotes/${remoteName}/`,
+  const result = execGit(
+    ["for-each-ref", "--format=%(refname) %(objectname)", `refs/remotes/${remoteName}/`],
     repoPath,
   );
-
-  if (result.success && result.output) {
-    for (const line of result.output.split("\n")) {
-      const match = line.match(/^refs\/remotes\/[^/]+\/(.+) ([a-f0-9]+)$/);
-      // Git 2.48+ records the remote's default branch as the symbolic ref <remote>/HEAD.
-      if (match && match[1] !== "HEAD") {
-        const [, name, sha] = match;
-        refs.set(`heads/${name}`, sha);
-      }
-    }
+  if (!result.success) throw new Error(`Failed to list destination branches: ${result.error}`);
+  const refs = new Map<string, string>();
+  for (const line of result.output.split("\n")) {
+    const match = line.match(/^refs\/remotes\/[^/]+\/(.+) ([a-f0-9]+)$/);
+    // Git 2.48+ records the remote default as the symbolic ref <remote>/HEAD.
+    if (match && match[1] !== "HEAD") refs.set(`heads/${match[1]}`, match[2]);
   }
 
-  // For tags, we need to check the remote's tags directly
-  // After fetch, remote tags are stored locally as regular tags
-  // We compare against what we fetched from private
-  const tagsResult = exec(`git ls-remote --tags ${remoteName}`, repoPath);
-
-  if (tagsResult.success && tagsResult.output) {
-    for (const line of tagsResult.output.split("\n")) {
-      const match = line.match(/^([a-f0-9]+)\s+refs\/tags\/(.+)$/);
-      if (match && !match[2].endsWith("^{}")) {
-        const [, sha, name] = match;
-        refs.set(`tags/${name}`, sha);
-      }
-    }
+  // Do not fetch destination tags into the source namespace. Read exact tag IDs,
+  // excluding the peeled object lines returned for annotated tags.
+  const tags = execGit(["ls-remote", "--tags", remoteName], repoPath);
+  if (!tags.success) throw new Error(`Failed to list destination tags: ${tags.error}`);
+  for (const line of tags.output.split("\n")) {
+    const match = line.match(/^([a-f0-9]+)\s+refs\/tags\/(.+)$/);
+    if (match && !match[2].endsWith("^{}")) refs.set(`tags/${match[2]}`, match[1]);
   }
-
   return refs;
 }
 
 export function isAncestor(repoPath: string, ancestor: string, descendant: string): boolean {
-  const result = exec(`git merge-base --is-ancestor ${ancestor} ${descendant}`, repoPath);
+  const result = execGit(["merge-base", "--is-ancestor", ancestor, descendant], repoPath);
   return result.success;
 }
 
 export function getCommitCount(repoPath: string, from: string, to: string): number {
-  const result = exec(`git rev-list --count ${from}..${to}`, repoPath);
+  const result = execGit(["rev-list", "--count", `${from}..${to}`], repoPath);
   if (result.success) {
     return Number.parseInt(result.output, 10) || 0;
   }
@@ -171,7 +176,8 @@ export function compareRefs(
   // Check all local refs
   for (const [refName, localSha] of localRefs) {
     const privateSha = privateRefs.get(refName) || null;
-    const [type, name] = refName.split("/", 2);
+    const [type, ...nameParts] = refName.split("/");
+    const name = nameParts.join("/");
     const target = type === "tags" ? tags : branches;
 
     if (!privateSha) {
@@ -230,7 +236,8 @@ export function compareRefs(
   // Check for refs that exist on private but not locally (removed from public)
   for (const [refName, privateSha] of privateRefs) {
     if (!localRefs.has(refName)) {
-      const [type, name] = refName.split("/", 2);
+      const [type, ...nameParts] = refName.split("/");
+      const name = nameParts.join("/");
       const target = type === "tags" ? tags : branches;
       target.push({
         name,
@@ -275,63 +282,46 @@ export function getDefaultBranch(repoPath: string): string {
 }
 
 export function getParentCommit(repoPath: string, commitRef: string): string | null {
-  const result = exec(`git rev-parse ${commitRef}^`, repoPath);
+  const result = execGit(["rev-parse", `${commitRef}^`], repoPath);
   if (result.success && result.output) {
     return result.output;
   }
   return null;
 }
 
-export function isSourceNoticeCommit(repoPath: string, commitRef: string): boolean {
-  // Check if the commit message matches our notice commit
-  const result = exec(`git log -1 --format=%s ${commitRef}`, repoPath);
-  if (result.success) {
-    return result.output === "Add source repository notice";
-  }
-  return false;
-}
-
-export interface SourceNoticeOptions {
-  cloneBaseDir?: string;
-  deleteClone?: boolean;
-  cloneName?: string;
-}
-
 function sanitizeCloneName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "-");
 }
 
-function getWorkClonePath(options?: SourceNoticeOptions): {
-  clonePath: string;
-  deleteClone: boolean;
-} {
-  const cloneBaseDir = options?.cloneBaseDir || tmpdir();
-  const deleteClone = options?.deleteClone ?? true;
-  const cloneName = options?.cloneName ? sanitizeCloneName(options.cloneName) : "repo-sync-work";
-  const clonePath = deleteClone
-    ? join(cloneBaseDir, `repo-sync-${Date.now()}`)
-    : join(cloneBaseDir, cloneName);
-  return { clonePath, deleteClone };
-}
-
 /**
- * `checkout -B` resets `branch` and moves HEAD to `origin/<branch>`. Report whether that would
- * drop commits: local commits on the branch, or a detached HEAD that no other branch contains.
+ * Report commits a refresh cannot preserve: local commits on the target branch,
+ * or a detached HEAD that no branch, tag, or cached remote branch contains.
  */
 function findUnpreservedCommits(clonePath: string, branch: string): string | undefined {
-  const target = `origin/${branch}`;
-  const localBranch = exec(`git rev-parse --verify --quiet refs/heads/${branch}`, clonePath);
+  const target = `refs/remotes/origin/${branch}`;
+  const localBranch = execGit(
+    ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+    clonePath,
+  );
   if (localBranch.success && !isAncestor(clonePath, `refs/heads/${branch}`, target)) {
     return `Work clone branch '${branch}' has commits that are not in the cache: ${clonePath}. Move or remove them before running clone.`;
   }
   const head = exec("git rev-parse --verify --quiet HEAD", clonePath);
   if (head.success && !isAncestor(clonePath, "HEAD", target)) {
-    const branches = exec(
-      "git for-each-ref --contains HEAD --format='%(refname)' refs/heads/",
+    const refs = execGit(
+      [
+        "for-each-ref",
+        "--contains",
+        "HEAD",
+        "--format=%(refname)",
+        "refs/heads/",
+        "refs/remotes/origin/",
+        "refs/tags/",
+      ],
       clonePath,
     );
-    if (!branches.success || branches.output.length === 0) {
-      return `Work clone HEAD has commits that are not on any branch or in the cache: ${clonePath}. Create a branch for them before running clone.`;
+    if (!refs.success || refs.output.length === 0) {
+      return `Work clone HEAD has commits that are not on any branch, tag, or in the cache: ${clonePath}. Create a branch for them before running clone.`;
     }
   }
   return undefined;
@@ -346,9 +336,15 @@ function prepareWorkClone(
   mkdirSync(dirname(clonePath), { recursive: true });
 
   if (!existsSync(clonePath)) {
-    const cloneResult = exec(
-      `git clone "${repoPath}" "${clonePath}" --branch ${branch} --single-branch`,
-    );
+    const cloneResult = execGit([
+      "clone",
+      "--branch",
+      branch,
+      ...(fastForwardOnly ? [] : ["--single-branch"]),
+      "--",
+      repoPath,
+      clonePath,
+    ]);
     if (!cloneResult.success) {
       return {
         success: false,
@@ -391,7 +387,7 @@ function prepareWorkClone(
       };
     }
     if (currentOrigin.output !== repoPath) {
-      const updateOriginResult = exec(`git remote set-url origin "${repoPath}"`, clonePath);
+      const updateOriginResult = execGit(["remote", "set-url", "origin", repoPath], clonePath);
       if (!updateOriginResult.success) {
         return {
           success: false,
@@ -401,7 +397,23 @@ function prepareWorkClone(
       }
     }
 
-    const fetchResult = exec("git fetch origin", clonePath);
+    if (fastForwardOnly) {
+      const refspecResult = execGit(
+        ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        clonePath,
+      );
+      if (!refspecResult.success) {
+        return {
+          success: false,
+          output: "",
+          error: `Failed to configure work clone branches: ${refspecResult.error}`,
+        };
+      }
+    }
+    const fetchResult = execGit(
+      ["fetch", ...(fastForwardOnly ? ["--tags"] : []), "origin"],
+      clonePath,
+    );
     if (!fetchResult.success) {
       return {
         success: false,
@@ -418,13 +430,33 @@ function prepareWorkClone(
     }
   }
 
-  const checkoutResult = exec(`git checkout -B ${branch} origin/${branch}`, clonePath);
+  const target = `refs/remotes/origin/${branch}`;
+  const localBranch = execGit(
+    ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+    clonePath,
+  );
+  const checkoutResult = fastForwardOnly
+    ? localBranch.success
+      ? execGit(["checkout", branch, "--"], clonePath)
+      : execGit(["checkout", "--track", "-b", branch, target], clonePath)
+    : execGit(["checkout", "-B", branch, target], clonePath);
   if (!checkoutResult.success) {
     return {
       success: false,
       output: "",
       error: `Failed to prepare branch '${branch}' in work clone: ${checkoutResult.error}`,
     };
+  }
+
+  if (fastForwardOnly) {
+    const mergeResult = execGit(["merge", "--ff-only", "--no-edit", target], clonePath);
+    if (!mergeResult.success) {
+      return {
+        success: false,
+        output: "",
+        error: `Failed to fast-forward branch '${branch}' in work clone: ${mergeResult.error}`,
+      };
+    }
   }
 
   return { success: true, output: "" };
@@ -456,116 +488,4 @@ export function cloneWorkDir(
     output: "Work clone ready",
     clonePath,
   };
-}
-
-export function addSourceNotice(
-  repoPath: string,
-  publicUrl: string,
-  branch: string,
-  options?: SourceNoticeOptions,
-): ExecResult {
-  const { clonePath: tempDir, deleteClone } = getWorkClonePath(options);
-
-  try {
-    const prepareResult = prepareWorkClone(repoPath, branch, tempDir);
-    if (!prepareResult.success) {
-      return {
-        success: false,
-        output: "",
-        error: prepareResult.error,
-      };
-    }
-
-    // Find README file (case-insensitive)
-    const readmeNames = [
-      "README.md",
-      "readme.md",
-      "README.MD",
-      "README",
-      "readme",
-      "README.txt",
-      "readme.txt",
-    ];
-    let readmePath: string | null = null;
-    let readmeName: string | null = null;
-
-    for (const name of readmeNames) {
-      const path = join(tempDir, name);
-      if (existsSync(path)) {
-        readmePath = path;
-        readmeName = name;
-        break;
-      }
-    }
-
-    if (!readmePath || !readmeName) {
-      // No README found, create one
-      readmePath = join(tempDir, "README.md");
-      readmeName = "README.md";
-      writeFileSync(readmePath, "");
-    }
-
-    // Read current content
-    const currentContent = readFileSync(readmePath, "utf-8");
-
-    // Check if notice already exists (from previous sync)
-    const noticeMarker = "<!-- repo-sync-source-notice -->";
-    let newContent: string;
-
-    if (currentContent.includes(noticeMarker)) {
-      // Replace existing notice
-      newContent = currentContent.replace(
-        /<!-- repo-sync-source-notice -->[\s\S]*?<!-- end-repo-sync-source-notice -->\n*/,
-        "",
-      );
-    } else {
-      newContent = currentContent;
-    }
-
-    // Prepend notice
-    const notice = `${noticeMarker}
-> **📦 Mirrored Repository**
->
-> This repository is automatically mirrored from [${publicUrl}](${publicUrl}).
-> Do not commit directly to this repository.
-<!-- end-repo-sync-source-notice -->
-
-`;
-
-    newContent = notice + newContent;
-    writeFileSync(readmePath, newContent);
-
-    // Configure git user for the commit
-    exec('git config user.email "repo-sync@localhost"', tempDir);
-    exec('git config user.name "repo-sync"', tempDir);
-
-    // Commit the change
-    exec(`git add "${readmeName}"`, tempDir);
-    const commitResult = exec('git commit -m "Add source repository notice"', tempDir);
-    if (!commitResult.success) {
-      if (
-        commitResult.error?.includes("nothing to commit") ||
-        commitResult.output?.includes("nothing to commit")
-      ) {
-        return { success: true, output: "Source notice already up to date" };
-      }
-      return { success: false, output: "", error: `Failed to commit: ${commitResult.error}` };
-    }
-
-    // Push back to the bare repo
-    const pushResult = exec(`git push origin ${branch}`, tempDir);
-    if (!pushResult.success) {
-      return {
-        success: false,
-        output: "",
-        error: `Failed to push to bare repo: ${pushResult.error}`,
-      };
-    }
-
-    return { success: true, output: "Source notice added" };
-  } finally {
-    if (deleteClone && existsSync(tempDir)) {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }
 }

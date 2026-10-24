@@ -1,7 +1,16 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cloneWorkDir, compareRefs, exec } from "./git.js";
+import {
+  cloneWorkDir,
+  compareRefs,
+  exec,
+  getLocalRefs,
+  getParentCommit,
+  getRemoteRefs,
+  pushRefs,
+} from "./git.js";
 import type { RefComparison } from "./types.js";
 
 describe("git", () => {
@@ -89,6 +98,20 @@ describe("git", () => {
 
       expect(result.status).toBe("missing");
     });
+
+    it("preserves slashes in branch and tag names", () => {
+      const result = compareRefs(
+        testDir,
+        new Map([
+          ["heads/release/1.x", "abc1234"],
+          ["tags/releases/v1", "abc1234"],
+        ]),
+        new Map([["heads/legacy/1.x", "abc1234"]]),
+      );
+
+      expect(result.branches.map(({ name }) => name)).toEqual(["release/1.x", "legacy/1.x"]);
+      expect(result.tags[0].name).toBe("releases/v1");
+    });
   });
 
   describe("cloneWorkDir", () => {
@@ -120,6 +143,288 @@ describe("git", () => {
       expect(result.clonePath).toContain("my-repo-name");
       expect(existsSync(result.clonePath)).toBe(true);
       expect(existsSync(join(result.clonePath, "README.md"))).toBe(true);
+    });
+  });
+
+  describe("archive work clones", () => {
+    let testDir: string;
+    let bareRepo: string;
+    let seedRepo: string;
+    let workRoot: string;
+
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync("git", args, { cwd, encoding: "utf-8", stdio: "pipe" }).trim();
+    const refresh = (branch = "main") =>
+      cloneWorkDir(bareRepo, branch, workRoot, "project", { fastForwardOnly: true });
+
+    beforeEach(() => {
+      testDir = mkdtempSync(join(tmpdir(), "repo-sync-archive-work-"));
+      bareRepo = join(testDir, "source.git");
+      seedRepo = join(testDir, "seed");
+      workRoot = join(testDir, "work");
+      git(testDir, "init", "--initial-branch=main", seedRepo);
+      git(seedRepo, "config", "user.email", "test@example.com");
+      git(seedRepo, "config", "user.name", "test");
+      writeFileSync(join(seedRepo, "README.md"), "hello\n");
+      git(seedRepo, "add", "README.md");
+      git(seedRepo, "commit", "-m", "init");
+      git(seedRepo, "branch", "feature/initial");
+      git(seedRepo, "tag", "v1");
+      git(testDir, "clone", "--bare", seedRepo, bareRepo);
+      git(seedRepo, "remote", "add", "origin", bareRepo);
+    });
+
+    afterEach(() => {
+      rmSync(testDir, { recursive: true, force: true });
+    });
+
+    it("exposes every archived branch in a new work clone", () => {
+      const result = refresh();
+
+      expect(result.success).toBe(true);
+      expect(git(result.clonePath, "rev-parse", "origin/feature/initial")).toBe(
+        git(seedRepo, "rev-parse", "HEAD"),
+      );
+      expect(git(result.clonePath, "rev-parse", "v1")).toBe(git(seedRepo, "rev-parse", "v1"));
+    });
+
+    it("keeps exact names when branches and tags share a name", () => {
+      git(seedRepo, "branch", "v1");
+      const refs = getLocalRefs(seedRepo);
+
+      expect(refs.get("heads/v1")).toBe(git(seedRepo, "rev-parse", "refs/heads/v1"));
+      expect(refs.get("tags/v1")).toBe(git(seedRepo, "rev-parse", "refs/tags/v1"));
+      expect(refs.has("heads/heads/v1")).toBe(false);
+      expect(refs.has("tags/tags/v1")).toBe(false);
+    });
+
+    it("reads source and destination tag listings larger than the default process buffer", () => {
+      const sha = git(seedRepo, "rev-parse", "HEAD");
+      const names = Array.from(
+        { length: 5000 },
+        (_, index) => `large-${String(index).padStart(5, "0")}-${"x".repeat(210)}`,
+      );
+      const originalRefs = git(seedRepo, "for-each-ref", "--format=%(objectname) %(refname)");
+      const entries = [
+        ...originalRefs.split("\n"),
+        ...names.map((name) => `${sha} refs/tags/${name}`),
+      ];
+      const packed = `# pack-refs with: sorted\n${entries.sort().join("\n")}\n`;
+      expect(Buffer.byteLength(packed)).toBeGreaterThan(1024 * 1024);
+      writeFileSync(join(seedRepo, ".git", "packed-refs"), packed);
+      writeFileSync(join(bareRepo, "packed-refs"), packed);
+
+      const local = getLocalRefs(seedRepo);
+      const remote = getRemoteRefs(seedRepo, "origin");
+
+      expect(local.size).toBe(5003); // Two branches and the original v1 tag.
+      expect(remote.size).toBe(5001);
+      for (const name of names) {
+        expect(local.get(`tags/${name}`)).toBe(sha);
+        expect(remote.get(`tags/${name}`)).toBe(sha);
+      }
+    });
+
+    it("reports failed ref listings instead of returning an incomplete map", () => {
+      expect(() => getLocalRefs(workRoot)).toThrow("Failed to list source refs");
+      expect(() => getRemoteRefs(seedRepo, "missing-remote")).toThrow(
+        "Failed to list destination tags",
+      );
+    });
+
+    it("fetches new branches and tags while fast-forwarding the default branch", () => {
+      const initial = refresh();
+      expect(initial.success).toBe(true);
+      git(seedRepo, "commit", "--allow-empty", "-m", "update");
+      git(seedRepo, "branch", "feature/later");
+      git(seedRepo, "tag", "v2");
+      git(seedRepo, "push", "--all", "origin");
+      git(seedRepo, "push", "--tags", "origin");
+
+      const result = refresh();
+
+      expect(result.success).toBe(true);
+      expect(git(result.clonePath, "rev-parse", "HEAD")).toBe(git(seedRepo, "rev-parse", "HEAD"));
+      expect(git(result.clonePath, "rev-parse", "origin/feature/later")).toBe(
+        git(seedRepo, "rev-parse", "feature/later"),
+      );
+      expect(git(result.clonePath, "rev-parse", "v2")).toBe(git(seedRepo, "rev-parse", "v2"));
+
+      const switched = refresh("feature/later");
+      expect(switched.success).toBe(true);
+      expect(git(switched.clonePath, "symbolic-ref", "--short", "HEAD")).toBe("feature/later");
+    });
+
+    it("refreshes all branches in an existing single-branch work clone", () => {
+      mkdirSync(workRoot);
+      const clonePath = join(workRoot, "project");
+      git(testDir, "clone", "--single-branch", "--branch", "main", bareRepo, clonePath);
+      expect(git(clonePath, "config", "--get", "remote.origin.fetch")).toBe(
+        "+refs/heads/main:refs/remotes/origin/main",
+      );
+
+      const result = refresh();
+
+      expect(result.success).toBe(true);
+      expect(git(clonePath, "config", "--get-all", "remote.origin.fetch")).toBe(
+        "+refs/heads/*:refs/remotes/origin/*",
+      );
+      expect(git(clonePath, "rev-parse", "origin/feature/initial")).toBe(
+        git(seedRepo, "rev-parse", "feature/initial"),
+      );
+    });
+
+    it("treats shell punctuation in archived branch names literally", () => {
+      const marker = join(testDir, "shell-executed");
+      // Empty shell quotes keep dot-prefixed temporary path components valid in a ref.
+      const branch = `main;touch\${IFS}${marker.replaceAll("/.", "/''.")};#`;
+      git(seedRepo, "checkout", "-b", branch);
+      git(seedRepo, "push", "origin", branch);
+      git(bareRepo, "symbolic-ref", "HEAD", `refs/heads/${branch}`);
+
+      const initial = refresh(branch);
+      expect(initial.success).toBe(true);
+      expect(git(initial.clonePath, "symbolic-ref", "--short", "HEAD")).toBe(branch);
+      const parent = git(seedRepo, "rev-parse", "HEAD");
+      git(seedRepo, "commit", "--allow-empty", "-m", "update");
+      git(seedRepo, "push", "origin", branch);
+
+      const result = refresh(branch);
+
+      expect(result.success).toBe(true);
+      expect(getParentCommit(result.clonePath, branch)).toBe(parent);
+      expect(git(result.clonePath, "rev-parse", "HEAD")).toBe(git(seedRepo, "rev-parse", "HEAD"));
+      expect(existsSync(marker)).toBe(false);
+    });
+
+    it("refuses to discard commits on the work clone's default branch", () => {
+      const initial = refresh();
+      git(
+        initial.clonePath,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "local work",
+      );
+      const localHead = git(initial.clonePath, "rev-parse", "HEAD");
+
+      const result = refresh();
+
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/commits that are not in the cache/);
+      expect(git(result.clonePath, "rev-parse", "HEAD")).toBe(localHead);
+    });
+
+    it.each(["remote branch", "tag"])(
+      "allows a detached HEAD preserved only by a cached %s",
+      (refType) => {
+        git(seedRepo, "checkout", "--detach");
+        git(seedRepo, "commit", "--allow-empty", "-m", "release only");
+        const releaseCommit = git(seedRepo, "rev-parse", "HEAD");
+        if (refType === "remote branch") {
+          git(seedRepo, "push", "origin", "HEAD:refs/heads/release");
+        } else {
+          git(seedRepo, "tag", "--annotate", "release", "--message", "release");
+          git(seedRepo, "push", "origin", "refs/tags/release");
+        }
+
+        const initial = refresh();
+        expect(initial.success).toBe(true);
+        git(initial.clonePath, "checkout", "--detach", releaseCommit);
+        expect(git(initial.clonePath, "for-each-ref", "--contains", "HEAD", "refs/heads/")).toBe(
+          "",
+        );
+
+        const result = refresh();
+
+        expect(result.success).toBe(true);
+        expect(git(result.clonePath, "symbolic-ref", "--short", "HEAD")).toBe("main");
+        const preservedRef =
+          refType === "remote branch" ? "origin/release" : "refs/tags/release^{}";
+        expect(git(result.clonePath, "rev-parse", preservedRef)).toBe(releaseCommit);
+      },
+    );
+
+    it("does not partially push branch updates when the destination rejects a tag", () => {
+      const originalCommit = git(bareRepo, "rev-parse", "refs/heads/main");
+      git(seedRepo, "commit", "--allow-empty", "-m", "update");
+      git(seedRepo, "branch", "new-feature");
+      git(seedRepo, "tag", "--force", "v1");
+
+      const result = pushRefs(seedRepo, "origin");
+
+      expect(result.success).toBe(false);
+      expect(git(bareRepo, "rev-parse", "refs/heads/main")).toBe(originalCommit);
+      expect(git(bareRepo, "rev-parse", "refs/tags/v1")).toBe(originalCommit);
+      expect(git(bareRepo, "for-each-ref", "refs/heads/new-feature")).toBe("");
+    });
+
+    it.each([false, true])("rejects a stale notice lease atomically (mirror=%s)", (mirror) => {
+      const expected = git(bareRepo, "rev-parse", "refs/heads/main");
+      git(seedRepo, "commit", "--allow-empty", "-m", "concurrent destination work");
+      git(seedRepo, "push", "origin", "main");
+      const concurrent = git(bareRepo, "rev-parse", "refs/heads/main");
+      git(seedRepo, "reset", "--hard", expected);
+      git(seedRepo, "commit", "--allow-empty", "-m", "replacement notice");
+      const replacement = git(seedRepo, "rev-parse", "HEAD");
+
+      git(seedRepo, "branch", "new-feature");
+      const result = pushRefs(seedRepo, "origin", {
+        mirror,
+        branchOverride: { branch: "main", commit: replacement, expected },
+      });
+
+      expect(result.success).toBe(false);
+      expect(git(bareRepo, "rev-parse", "refs/heads/main")).toBe(concurrent);
+      expect(git(bareRepo, "for-each-ref", "refs/heads/new-feature")).toBe("");
+    });
+
+    it("protects a destination branch created after the first-notice status check", () => {
+      const existing = git(bareRepo, "rev-parse", "refs/heads/main");
+      git(seedRepo, "commit", "--allow-empty", "-m", "first notice");
+      const commit = git(seedRepo, "rev-parse", "HEAD");
+      git(seedRepo, "branch", "new-feature");
+
+      const result = pushRefs(seedRepo, "origin", {
+        mirror: true,
+        branchOverride: { branch: "main", commit, expected: "" },
+      });
+
+      expect(result.success).toBe(false);
+      expect(git(bareRepo, "rev-parse", "refs/heads/main")).toBe(existing);
+      expect(git(bareRepo, "for-each-ref", "refs/heads/new-feature")).toBe("");
+    });
+
+    it("preserves detached commits until they have a branch", () => {
+      const initial = refresh();
+      git(initial.clonePath, "checkout", "--detach");
+      git(
+        initial.clonePath,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "detached work",
+      );
+      const detachedHead = git(initial.clonePath, "rev-parse", "HEAD");
+
+      const refused = refresh();
+      expect(refused.success).toBe(false);
+      expect(refused.error).toMatch(/not on any branch/);
+      expect(git(refused.clonePath, "rev-parse", "HEAD")).toBe(detachedHead);
+
+      git(initial.clonePath, "branch", "local-work");
+      const result = refresh();
+      expect(result.success).toBe(true);
+      expect(git(result.clonePath, "rev-parse", "local-work")).toBe(detachedHead);
+      expect(git(result.clonePath, "symbolic-ref", "--short", "HEAD")).toBe("main");
     });
   });
 });

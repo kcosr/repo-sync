@@ -1,8 +1,8 @@
 import { rmSync } from "node:fs";
 import { ensureCacheDir, getRepoTempPath, getWorkDir, isArchiveRepo } from "./config.js";
 import {
+  type PushRefsOptions,
   addRemote,
-  addSourceNotice,
   cloneMirror,
   cloneWorkDir,
   compareRefs,
@@ -10,23 +10,15 @@ import {
   fetchRemote,
   getDefaultBranch,
   getLocalRefs,
-  getParentCommit,
+  getRemoteBranchHead,
   getRemoteRefs,
   getRepoCloneTime,
   isImportedCache,
-  isSourceNoticeCommit,
-  pushMirror,
   pushRefs,
   repoExists,
 } from "./git.js";
-import { getLastImport } from "./import.js";
-import type {
-  ImportRecord,
-  RefComparison,
-  RemoteRepoConfig,
-  RepoConfig,
-  RepoStatus,
-} from "./types.js";
+import { inspectSourceNotice, prepareSourceNotice, sourceNoticeMatches } from "./source-notice.js";
+import type { RefComparison, RemoteRepoConfig, RepoConfig, RepoStatus } from "./types.js";
 
 export interface PullResult {
   success: boolean;
@@ -122,7 +114,21 @@ export function pull(repo: RemoteRepoConfig, options?: SyncOptions): PullResult 
   };
 }
 
+interface PushPlan {
+  branch: string;
+  sourceCommit?: string;
+  privateCommit?: string;
+}
+
 export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
+  const { plan: _plan, ...result } = inspectStatus(repo, options);
+  return result;
+}
+
+function inspectStatus(
+  repo: RepoConfig,
+  options?: SyncOptions,
+): StatusResult & { plan?: PushPlan } {
   const repoPath = getRepoTempPath(repo.name, options?.cacheDir);
   const archive = isArchiveRepo(repo);
   const errors: string[] = [];
@@ -151,7 +157,6 @@ export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
 
   baseStatus.pulled = true;
   if (archive) {
-    baseStatus.lastImport = getLastImport(repo.name, options?.cacheDir);
     // Imports never rewrite cache configuration, so pick up private URL changes here.
     const remoteResult = addRemote(repoPath, "private", repo.private);
     if (!remoteResult.success) {
@@ -186,43 +191,109 @@ export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
     console.log("  Note: Could not fetch from private (may be empty or new)");
   }
 
-  // Get refs
-  const localRefs = getLocalRefs(repoPath);
-  const privateRefs = getRemoteRefs(repoPath, "private");
+  // An incomplete listing must never become a push or deletion plan.
+  let localRefs: Map<string, string>;
+  let privateRefs: Map<string, string>;
+  try {
+    localRefs = getLocalRefs(repoPath);
+    privateRefs = getRemoteRefs(repoPath, "private");
+  } catch (error) {
+    const message = `Could not inspect refs: ${error instanceof Error ? error.message : error}`;
+    return {
+      status: { ...baseStatus, error: message },
+      canPush: false,
+      hasChanges: false,
+      errors: [message],
+    };
+  }
 
-  // If markSource is enabled, check if private's default branch HEAD is our notice commit
-  // If so, use its parent for comparison instead
-  if (!archive && repo.markSource) {
-    const defaultBranch = getDefaultBranch(repoPath);
-    const branchKey = `heads/${defaultBranch}`;
-    const privateBranchSha = privateRefs.get(branchKey);
-
-    if (privateBranchSha) {
-      // Check if this is our notice commit by checking the commit message
-      const privateRef = `refs/remotes/private/${defaultBranch}`;
-      if (isSourceNoticeCommit(repoPath, privateRef)) {
-        // Get the parent (the actual source commit)
-        const parentSha = getParentCommit(repoPath, privateRef);
-        if (parentSha) {
-          console.log("  Note: Comparing against parent of notice commit");
-          privateRefs.set(branchKey, parentSha);
+  // Source branches stay pristine. Only verified generated destination tips are
+  // compared using their original source parent, independent of the selected mode.
+  const branch = getDefaultBranch(repoPath);
+  const branchKey = `heads/${branch}`;
+  const localCommit = localRefs.get(branchKey);
+  const privateCommit = privateRefs.get(branchKey);
+  const comparisonRefs = new Map(privateRefs);
+  let sourceCommit = localCommit;
+  let replaceNotice = false;
+  try {
+    if (localCommit && !archive) {
+      // Older markSource versions wrote their notice back into the source cache.
+      const cachedNotice = inspectSourceNotice(repoPath, localCommit);
+      if (cachedNotice) {
+        const upstream = getRemoteBranchHead(repoPath, "origin", branch);
+        if (
+          !upstream.success ||
+          ![localCommit, cachedNotice.sourceCommit].includes(upstream.output)
+        ) {
+          throw new Error(
+            "Run 'repo-sync pull' to refresh the source cache before changing its notice",
+          );
         }
+        // An upstream commit must be preserved even if it resembles our notice.
+        sourceCommit = upstream.output;
+        localRefs.set(branchKey, sourceCommit);
       }
     }
+    if (privateCommit && privateCommit !== sourceCommit) {
+      const notice = inspectSourceNotice(repoPath, privateCommit);
+      if (notice) {
+        comparisonRefs.set(branchKey, notice.sourceCommit);
+        replaceNotice = true;
+      }
+    }
+    const mode = repo.sourceNotice ?? "none";
+    if (archive && mode === "linked") {
+      throw new Error(
+        "Archive repositories do not support linked notices; use sourceNotice: generic",
+      );
+    }
+    if (sourceCommit && (mode !== "none" || replaceNotice)) {
+      baseStatus.sourceNoticeChanged =
+        !privateCommit ||
+        !sourceNoticeMatches(
+          repoPath,
+          privateCommit,
+          sourceCommit,
+          mode,
+          archive ? undefined : repo.public,
+        );
+    }
+  } catch (error) {
+    const message = `Could not inspect source notice: ${error instanceof Error ? error.message : error}`;
+    return {
+      status: { ...baseStatus, error: message },
+      canPush: false,
+      hasChanges: false,
+      errors: [message],
+    };
   }
 
   // Compare
-  const { branches, tags } = compareRefs(repoPath, localRefs, privateRefs);
+  const { branches, tags } = compareRefs(repoPath, localRefs, comparisonRefs);
   baseStatus.branches = branches;
   baseStatus.tags = tags;
+
+  // Git tags are immutable on archive destinations, even if their commits are related.
+  const changedTags = archive
+    ? tags.filter((tag) => tag.localRef && tag.privateRef && tag.localRef !== tag.privateRef)
+    : [];
+  if (changedTags.length > 0) {
+    for (const tag of changedTags) tag.status = "diverged";
+    errors.push(
+      `Existing tags cannot change on private: ${changedTags.map((tag) => tag.name).join(", ")}`,
+    );
+  }
 
   // Determine if we can push
   const hasBehind = [...branches, ...tags].some((r) => r.status === "behind");
   const hasDiverged = [...branches, ...tags].some((r) => r.status === "diverged");
   // Archive imports never delete: refs only on private are kept, so they are not changes.
-  const hasChanges = [...branches, ...tags].some(
-    (r) => r.status === "ahead" || r.status === "new" || (!archive && r.status === "missing"),
-  );
+  const hasChanges =
+    !!baseStatus.sourceNoticeChanged ||
+    [...branches, ...tags].some(
+      (r) => r.status === "ahead" || r.status === "new" || (!archive && r.status === "missing"),
+    );
 
   if (hasBehind) {
     errors.push(
@@ -240,6 +311,7 @@ export function status(repo: RepoConfig, options?: SyncOptions): StatusResult {
     canPush: !hasBehind && !hasDiverged,
     hasChanges,
     errors,
+    plan: { branch, sourceCommit, privateCommit },
   };
 }
 
@@ -254,8 +326,7 @@ export function push(repo: RepoConfig, options?: SyncOptions): PushResult {
     };
   }
 
-  // Check status first (compares against parent of notice commit if markSource is enabled)
-  const statusResult = status(repo, options);
+  const statusResult = inspectStatus(repo, options);
   if (!statusResult.canPush) {
     return {
       success: false,
@@ -271,29 +342,41 @@ export function push(repo: RepoConfig, options?: SyncOptions): PushResult {
     };
   }
 
-  // Add source notice if configured
-  if (!isArchiveRepo(repo) && repo.markSource) {
-    console.log("  Adding source notice to README...");
-    const branch = getDefaultBranch(repoPath);
-    const noticeResult = addSourceNotice(repoPath, repo.public, branch, {
-      cloneBaseDir: getWorkDir(options?.cacheDir),
-      deleteClone: repo.markSourceDeleteClone,
-      cloneName: repo.name,
-    });
-    if (!noticeResult.success) {
+  const plan = statusResult.plan;
+  if (!plan) return { success: false, pushed: false, error: "Could not prepare push" };
+  const archive = isArchiveRepo(repo);
+  let branchOverride: PushRefsOptions["branchOverride"];
+  if (plan.sourceCommit) {
+    try {
+      const mode = repo.sourceNotice ?? "none";
+      const publicUrl = archive ? undefined : repo.public;
+      const desiredCommit =
+        plan.privateCommit &&
+        sourceNoticeMatches(repoPath, plan.privateCommit, plan.sourceCommit, mode, publicUrl)
+          ? plan.privateCommit
+          : prepareSourceNotice(repoPath, plan.sourceCommit, mode, publicUrl);
+      branchOverride = {
+        branch: plan.branch,
+        commit: desiredCommit,
+        expected: plan.privateCommit ?? "",
+      };
+    } catch (error) {
       return {
         success: false,
         pushed: false,
-        error: `Failed to add source notice: ${noticeResult.error}`,
+        error: `Failed to prepare source notice: ${error instanceof Error ? error.message : error}`,
       };
     }
   }
 
-  // Push
   console.log(`  Pushing to ${repo.private}...`);
-  const pushResult = isArchiveRepo(repo)
-    ? pushRefs(repoPath, "private")
-    : pushMirror(repoPath, "private");
+  const pushResult = pushRefs(repoPath, "private", {
+    mirror: !archive,
+    // The exact lease also protects a first notice or branch creation from races.
+    // Replacing a generated tip is allowed only after its source parent passes
+    // the ancestry comparison above; other source-history rewrites are refused.
+    branchOverride,
+  });
   if (!pushResult.success) {
     return {
       success: false,
@@ -368,11 +451,6 @@ export function formatRefComparison(ref: RefComparison): string {
   }
 }
 
-function formatImport(record: ImportRecord): string {
-  const when = new Date(record.importedAt).toLocaleString();
-  return `${when} (${record.branch} at ${record.commit.substring(0, 12)}, archive sha256 ${record.archive.sha256?.substring(0, 12)})`;
-}
-
 export function formatStatus(result: StatusResult): string {
   const lines: string[] = [];
   const { status: s } = result;
@@ -391,9 +469,6 @@ export function formatStatus(result: StatusResult): string {
     return lines.join("\n");
   }
 
-  if (s.lastImport) {
-    lines.push(`  Imported: ${formatImport(s.lastImport)}`);
-  }
   if (s.pulledAt) {
     lines.push(`  Pulled:  ${s.pulledAt.toLocaleString()}`);
   }
@@ -403,9 +478,13 @@ export function formatStatus(result: StatusResult): string {
   const changedBranches = s.branches.filter(isChange);
   const changedTags = s.tags.filter(isChange);
 
+  if (s.sourceNoticeChanged) {
+    lines.push("  Source notice: update pending");
+  }
+
   if (s.error) {
     lines.push("  Status:  Unknown (see errors)");
-  } else if (changedBranches.length === 0 && changedTags.length === 0) {
+  } else if (changedBranches.length === 0 && changedTags.length === 0 && !s.sourceNoticeChanged) {
     lines.push("  Status:  Up to date ✓");
   } else {
     if (changedBranches.length > 0) {

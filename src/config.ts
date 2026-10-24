@@ -45,10 +45,6 @@ export function getStagingDir(cacheDir?: string): string {
   return join(resolveCacheDir(cacheDir), "staging");
 }
 
-export function getImportRecordsDir(repoName: string, cacheDir?: string): string {
-  return join(resolveCacheDir(cacheDir), "imports", repoName);
-}
-
 export function getRepoTempPath(repoName: string, cacheDir?: string): string {
   return join(getTempDir(cacheDir), `${repoName}.git`);
 }
@@ -97,9 +93,7 @@ export function loadConfig(configPath?: string): Config {
     throw new Error("Config must have a 'repos' array");
   }
 
-  for (const repo of config.repos) {
-    validateRepoConfig(repo);
-  }
+  config.repos = config.repos.map(normalizeRepoConfig);
 
   return config;
 }
@@ -118,7 +112,7 @@ function validateArchiveLimits(limits: unknown): void {
   }
 }
 
-function validateRepoConfig(repo: RepoConfig): void {
+function normalizeRepoConfig(repo: RepoConfig & { markSource?: unknown }): RepoConfig {
   if (!repo.name || typeof repo.name !== "string") {
     throw new Error("Each repo must have a 'name' string");
   }
@@ -126,11 +120,36 @@ function validateRepoConfig(repo: RepoConfig): void {
   if (source !== undefined && source !== "remote" && source !== "archive") {
     throw new Error(`Repo '${repo.name}' has invalid 'source': expected 'remote' or 'archive'`);
   }
+  const hasLegacyNotice = "markSource" in repo;
+  if (hasLegacyNotice && "sourceNotice" in repo) {
+    throw new Error(`Repo '${repo.name}' cannot set both 'sourceNotice' and 'markSource'`);
+  }
+  if (hasLegacyNotice) {
+    if (typeof repo.markSource !== "boolean") {
+      throw new Error(`Repo '${repo.name}' has invalid 'markSource': expected boolean`);
+    }
+    repo.sourceNotice = repo.markSource ? "linked" : "none";
+  } else if (!("sourceNotice" in repo)) {
+    repo.sourceNotice = "none";
+  }
+  if (!["linked", "generic", "none"].includes(repo.sourceNotice as string)) {
+    throw new Error(
+      `Repo '${repo.name}' has invalid 'sourceNotice': expected 'linked', 'generic' or 'none'`,
+    );
+  }
+  if ("markSourceDeleteClone" in repo) {
+    throw new Error(
+      `Repo '${repo.name}' cannot set 'markSourceDeleteClone': sourceNotice no longer creates work clones; use 'repo-sync clone' for a work clone`,
+    );
+  }
   if (isArchiveRepo(repo)) {
-    for (const key of ["public", "markSource", "markSourceDeleteClone"]) {
-      if (key in repo) {
-        throw new Error(`Repo '${repo.name}' is archive-managed and cannot set '${key}'`);
-      }
+    if ("public" in repo) {
+      throw new Error(`Repo '${repo.name}' is archive-managed and cannot set 'public'`);
+    }
+    if (repo.sourceNotice === "linked") {
+      throw new Error(
+        `Repo '${repo.name}' is archive-managed and cannot use sourceNotice: linked; use sourceNotice: generic for a notice without a source URL`,
+      );
     }
   } else {
     if (!repo.public || typeof repo.public !== "string") {
@@ -140,13 +159,8 @@ function validateRepoConfig(repo: RepoConfig): void {
   if (!repo.private || typeof repo.private !== "string") {
     throw new Error(`Repo '${repo.name}' must have a 'private' URL`);
   }
-  if (
-    !isArchiveRepo(repo) &&
-    repo.markSourceDeleteClone !== undefined &&
-    typeof repo.markSourceDeleteClone !== "boolean"
-  ) {
-    throw new Error(`Repo '${repo.name}' has invalid 'markSourceDeleteClone': expected boolean`);
-  }
+  const { markSource: _legacyNotice, ...normalized } = repo;
+  return normalized;
 }
 
 export function findRepo(config: Config, name: string): RepoConfig | undefined {

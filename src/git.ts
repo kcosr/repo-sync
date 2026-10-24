@@ -63,6 +63,19 @@ export function pushMirror(repoPath: string, remoteName: string): ExecResult {
   );
 }
 
+export function pushRefs(repoPath: string, remoteName: string): ExecResult {
+  // Archive-managed refs only move forward and are never deleted on the remote.
+  return exec(
+    `git push ${remoteName} "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*"`,
+    repoPath,
+    false,
+  );
+}
+
+export function isImportedCache(repoPath: string): boolean {
+  return exec("git config --get repo-sync.source", repoPath).output === "archive";
+}
+
 export function getLocalRefs(repoPath: string): Map<string, string> {
   const refs = new Map<string, string>();
 
@@ -108,7 +121,8 @@ export function getRemoteRefs(repoPath: string, remoteName: string): Map<string,
   if (result.success && result.output) {
     for (const line of result.output.split("\n")) {
       const match = line.match(/^refs\/remotes\/[^/]+\/(.+) ([a-f0-9]+)$/);
-      if (match) {
+      // Git 2.48+ records the remote's default branch as the symbolic ref <remote>/HEAD.
+      if (match && match[1] !== "HEAD") {
         const [, name, sha] = match;
         refs.set(`heads/${name}`, sha);
       }
